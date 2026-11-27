@@ -70,6 +70,15 @@ class Snap(val w: Int, val h: Int, private val hsv: Mat, private val gray: Mat) 
             frac(rect, Scalar(0.0, 90.0, 100.0), Scalar(6.0, 255.0, 255.0))
     }
 
+    /** O slot i (1, 2 ou 3) está com o X vermelho: poder indisponível agora, não adianta tocar nele. */
+    fun slotBlocked(i: Int): Boolean {
+        val (a, b) = when (i) { 3 -> 0.08f to 0.18f; 2 -> 0.185f to 0.287f; else -> 0.293f to 0.395f }
+        val sub = Mat(hsv, r(a, 0.87f, b, 0.945f))
+        val x = isRedX(sub)
+        sub.release()
+        return x
+    }
+
     /** Círculo do mini-evento "TOQUE RÁPIDO": centro em proporção da tela. */
     fun ball(): PointF? {
         val rect = r(0.40f, 0.15f, 0.95f, 0.90f)
@@ -162,10 +171,32 @@ class Snap(val w: Int, val h: Int, private val hsv: Mat, private val gray: Mat) 
     fun release() { hsv.release(); gray.release() }
 }
 
+/**
+ * O recorte HSV de um slot de poder mostra o X vermelho (poder indisponível agora)? O X é vermelho puro e vai de ponta a ponta
+ * do slot (vermelho nos terços esquerdo E direito); o círculo rosa de poder carregado é só uma mancha no centro e é magenta.
+ * Calibrado no print do jogo: X = 0,08 nos dois terços e 0 de magenta; slots normais = 0.
+ */
+private fun isRedX(sub: Mat): Boolean {
+    val red = Mat(); val red2 = Mat(); val mag = Mat()
+    Core.inRange(sub, Scalar(0.0, 150.0, 120.0), Scalar(5.0, 255.0, 255.0), red)
+    Core.inRange(sub, Scalar(174.0, 150.0, 120.0), Scalar(180.0, 255.0, 255.0), red2)
+    Core.bitwise_or(red, red2, red)
+    Core.inRange(sub, Scalar(150.0, 90.0, 100.0), Scalar(172.0, 255.0, 255.0), mag)
+    val t = maxOf(1, red.cols() / 3)
+    val l = Mat(red, Rect(0, 0, t, red.rows()))
+    val rr = Mat(red, Rect(red.cols() - t, 0, t, red.rows()))
+    val left = Core.mean(l).`val`[0] / 255.0
+    val right = Core.mean(rr).`val`[0] / 255.0
+    val magenta = Core.mean(mag).`val`[0] / 255.0
+    l.release(); rr.release(); red.release(); red2.release(); mag.release()
+    return left > 0.03 && right > 0.03 && magenta < 0.02
+}
+
 object Heur {
     /**
      * Leitura rápida dos 3 slots de poder: recorta só a faixa de baixo (bem mais barato que o quadro todo).
-     * Devolve [slot3, slot2, slot1] = carregado?  (rosa do número OU brilho acima do limite).
+     * Devolve 6 valores: [0..2] = [slot3, slot2, slot1] carregado? (rosa do número OU brilho acima do limite, e SEM o X vermelho);
+     * [3..5] = [slot3, slot2, slot1] está com o X vermelho (indisponível)?
      */
     fun power(bmp: Bitmap, brightTh: Double, pinkTh: Double): BooleanArray {
         val x0 = (0.06f * bmp.width).toInt()
@@ -176,7 +207,7 @@ object Heur {
         val rgba = Mat(); Utils.bitmapToMat(crop, rgba)
         val rgb = Mat(); Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
         val hsv = Mat(); Imgproc.cvtColor(rgb, hsv, Imgproc.COLOR_RGB2HSV)
-        val out = BooleanArray(3)
+        val out = BooleanArray(6)
         val slots = listOf(0.08f to 0.18f, 0.185f to 0.287f, 0.293f to 0.395f)   // slot 3, 2, 1
         for ((i, ab) in slots.withIndex()) {
             val sx = ((ab.first * bmp.width) - x0).toInt().coerceIn(0, hsv.cols() - 2)
@@ -194,7 +225,9 @@ object Heur {
             val bsub = Mat(hsv, Rect(sx, by0, ex - sx, by1 - by0))
             val bright = Core.mean(bsub).`val`[2] / 255.0
             bsub.release()
-            out[i] = pink > pinkTh || bright > brightTh
+            val blocked = isRedX(sub)
+            out[i] = !blocked && (pink > pinkTh || bright > brightTh)
+            out[3 + i] = blocked
             sub.release(); a.release(); b.release()
         }
         rgba.release(); rgb.release(); hsv.release(); crop.recycle()

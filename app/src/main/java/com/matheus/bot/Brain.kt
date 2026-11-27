@@ -61,7 +61,7 @@ class Brain(
     private var lastShape = 0L
     /** Janela em que um minigame pode aparecer: logo depois de o bot usar um poder (1, 2 ou 3). */
     @Volatile private var evWindowUntil = 0L
-    private fun markPower() { evWindowUntil = now() + 6000 }
+    private fun markPower() { evWindowUntil = now() + 8000 }
     private var barDebug = 0
 
     fun start() {
@@ -123,7 +123,7 @@ class Brain(
         if (sc == Sc.AVANCAR) fights++
         if (sc == Sc.COMBATE) lastPower2 = now()
         unknown = 0
-        say("Tela: $sc | lutas: $fights")
+        say("$sc | lutas: $fights")
         last = sc
     }
 
@@ -161,7 +161,7 @@ class Brain(
             }
             s.has("CRIE SUA EQUIPE") -> {
                 enter(Sc.EQUIPE_VAZIA)
-                say("Montando o time 1 (Flash Reverso, Apocalipse, Nevasca)...")
+                say("Montando o time 1...")
                 showUi(false)
                 val err = try { delay(700); swap.createTeam1(g) } finally { showUi(true) }
                 if (err == null) say("Time 1 escolhido. Equipe os 3 na mão (equipamentos = próxima etapa) e aperte ▶ Play. Pausado.")
@@ -184,7 +184,7 @@ class Brain(
                         unknown++
                         if (unknown == 1) {
                             saveDebug(bmp, "desconhecida")
-                            say("Tela desconhecida (azul=%.3f roxo=%.3f)".format(lastHud, lastPur))
+                            say("Tela desconhecida")
                         }
                         // Tentativa às cegas: se ficou parado numa tela sem texto reconhecido, pode ser a roleta.
                         if (unknown >= 4 && now() - lastBlindSpin > 4000) {
@@ -281,15 +281,15 @@ class Brain(
         if (ev != null && now() - evAt < 1500 && now() >= evBlockUntil) {
             evScreen = null
             val handled = when {
-                ev.has("PASSE") || ev.has("DEDO") -> { swipeEvent(g); true }
-                ev.has("ARREMESS") -> { toss(g, w, h); true }
-                ev.has("TOQUE") && ev.has("RAPIDO") -> { ball(g, w, h); true }
+                ev.has("PASSE") || ev.has("DEDO") -> { say("Minigame: seta"); swipeEvent(g); true }
+                ev.has("ARREMESS") -> { say("Minigame: arremesso"); toss(g, w, h); true }
+                ev.has("TOQUE") && ev.has("RAPIDO") -> { say("Minigame: bolinha"); ball(g, w, h); true }
                 // Minigame de encher a barra (texto ainda não visto): spam de toques na tela enquanto o texto durar.
                 // Os gatilhos genéricos (palavras soltas) só valem na janela depois de usar um poder; os textos específicos
                 // acima (PASSE O DEDO, ARREMESSAR, TOQUE RÁPIDO) valem sempre, porque também podem vir por um ícone na tela.
                 now() < evWindowUntil && ev.hasAny("ENCHER", "BARRA", "CARREG", "MARTEL", "TOQUE") -> {
                     if (evDebug < 3) { saveDebug(bmp, "evento_barra"); evDebug++ }
-                    mash(g, w, h, null); true
+                    say("Minigame: barra"); mash(g, w, h, null); true
                 }
                 else -> false
             }
@@ -304,7 +304,7 @@ class Brain(
             val bp = snap.barCircle()
             if (bp != null) {
                 if (barDebug < 3) { saveDebug(bmp, "barra_ok"); barDebug++ }
-                mash(g, w, h, bp); evBlockUntil = now() + 500; return
+                say("Minigame: barra"); mash(g, w, h, bp); evBlockUntil = now() + 500; return
             }
         }
 
@@ -313,21 +313,31 @@ class Brain(
         val p3 = snap.slotPink(3); val p2 = snap.slotPink(2); val p1 = snap.slotPink(1)
         val pinkTh = 0.04
         if (now() - lastInfo > 1000) {
-            say("COMBATE  rosa: 3=%.2f 2=%.2f 1=%.2f (lim %.2f) | brilho: 3=%.2f 2=%.2f 1=%.2f (lim %.2f)"
-                .format(p3, p2, p1, pinkTh, v3, v2, v1, th))
+            say("Combate | lutas: $fights | especial há ${(now() - lastPower2) / 1000}s")
             lastInfo = now()
         }
-        val c3 = p3 > pinkTh || v3 > th
-        val c2 = p2 > pinkTh || v2 > th
-        val c1 = p1 > pinkTh || v1 > th
+        val x3 = snap.slotBlocked(3); val x2 = snap.slotBlocked(2); val x1 = snap.slotBlocked(1)   // X vermelho = poder indisponível
+        val c3 = !x3 && (p3 > pinkTh || v3 > th)
+        val c2 = !x2 && (p2 > pinkTh || v2 > th)
+        val c1 = !x1 && (p1 > pinkTh || v1 > th)
         // Toca no centro do número (círculo rosa) de cada slot.
         if (cfg.ult && c3) { markPower(); g.tap(w * 0.13f, h * 0.905f); lastEvCheck = 0; delay(120); return }
         if (c2) { markPower(); g.tap(w * 0.236f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }
+        // Poder 2 com X vermelho (indisponível): usa o poder 1 se estiver carregado, em vez de ficar tocando no 2.
+        if (x2 && c1) { markPower(); g.tap(w * 0.343f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }
         val sec = cfg.power1AfterSec
         if (sec > 0 && now() - lastPower2 > sec * 1000L && c1) {
             markPower(); g.tap(w * 0.343f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return
         }
         combo(g, w, h)
+    }
+
+    /** Há um mini-evento já lido e ainda fresco? Usa os mesmos gatilhos do combatTick. O combo usa isto para sair cedo. */
+    private fun eventReady(): Boolean {
+        val ev = evScreen ?: return false
+        if (now() - evAt >= 1500 || now() < evBlockUntil) return false
+        return ev.has("PASSE") || ev.has("DEDO") || ev.has("ARREMESS") || (ev.has("TOQUE") && ev.has("RAPIDO")) ||
+            (now() < evWindowUntil && ev.hasAny("ENCHER", "BARRA", "CARREG", "MARTEL", "TOQUE"))
     }
 
     /** Lê o texto do evento em segundo plano (no máximo uma leitura por vez, a cada ~0,15 s). */
@@ -357,12 +367,17 @@ class Brain(
             val x2 = x1 + w * (0.14f + Random.nextFloat() * 0.06f)   // máx ≈ 0,84: longe dos botões do Android
             g.swipe(x1, y, x2, y, 40L + Random.nextInt(20))
             if (cfg.comboGapMs > 0) delay(cfg.comboGapMs.toLong())
+            // Continua lendo o texto do evento DURANTE o combo e sai na hora se apareceu um: antes só olhava no começo de cada
+            // rodada (8 arrastos, ~1 s), então o spam do minigame começava quase 1 s atrasado.
+            if (!evBusy && now() - lastEvCheck >= 150) cap.latest()?.let { scanEvent(it) }
+            if (eventReady()) return
             if (i % 2 == 1) {
                 val b = cap.latest()
                 if (b != null) {
                     val c = Heur.power(b, th, 0.04)
                     if (cfg.ult && c[0]) { markPower(); g.tap(w * 0.13f, h * 0.905f); lastEvCheck = 0; delay(120); return }
                     if (c[1]) { markPower(); g.tap(w * 0.236f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }
+                    if (c[4] && c[2]) { markPower(); g.tap(w * 0.343f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }   // poder 2 com X: usa o 1
                 }
             }
         }
@@ -450,7 +465,7 @@ class Brain(
         var pt = start ?: PointF(0.568f, 0.62f)
         var seen = start != null
         var misses = 0
-        var lastCheck = 0L
+        var lastCheck = now()   // o 1º toque sai já; a conferência da forma só vem ~0,15 s depois (antes ela atrasava o 1º toque)
         while (currentCoroutineContext().isActive && now() < end) {
             if (now() - lastCheck >= 150) {
                 lastCheck = now()

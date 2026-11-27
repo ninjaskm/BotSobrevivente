@@ -27,9 +27,11 @@ class TeamSwap(
 
     // `sub`: subtítulo que a carta CERTA tem (linha pequena em cima do nome). `notSub`: subtítulo que a carta ERRADA tem.
     // `minLevel`: nível mínimo da carta certa (número no canto superior direito da carta na lista), para separar versões.
+    // `strict`: nunca aceita a carta com o subtítulo ilegível (para quando a versão ERRADA não tem subtítulo nenhum).
+    // `sub` aceita alternativas separadas por "|" (basta ler uma delas).
     private class Target(
         val label: String, val key: String, val exact: Boolean,
-        val sub: String? = null, val notSub: String? = null, val minLevel: Int = 0,
+        val sub: String? = null, val notSub: String? = null, val minLevel: Int = 0, val strict: Boolean = false,
     )
 
     // Os 3 personagens do time 2. A POSIÇÃO na lista = quadrado de destino (1º, 2º, 3º).
@@ -41,7 +43,7 @@ class TeamSwap(
         // Existe mais de um Caçador de Marte: o certo é "Noite Mais Densa" nível 50 (o outro é nível 45, sem subtítulo).
         // A chave é "DE MARTE" (não "CACADOR"): o Lobo tem o subtítulo "Caçador de Recompensas" e era confundido com ele.
         // ("DE MARTE" e não só "MARTE", para não casar com "martelo".)
-        Target("Caçador de Marte", "DE MARTE", false, sub = "NOITE", minLevel = 50),
+        Target("Caçador de Marte", "DE MARTE", false, sub = "NOITE|DENSA", minLevel = 50, strict = true),
     )
 
     // Os 3 do time 1, na ordem dos quadrados (foto de referência: Flash Reverso, Apocalipse, Nevasca).
@@ -97,7 +99,8 @@ class TeamSwap(
     /** Se o alvo exige subtítulo, ele tem que estar logo acima do nome (mesma carta). */
     private fun subOk(s: Screen, name: Word, t: Target): Boolean {
         val sub = t.sub ?: return true
-        return s.words.any { it.text.contains(sub) && abs(it.cx - name.cx) < 0.08f && (name.cy - it.cy) in 0.015f..0.08f }
+        val subs = sub.split('|')
+        return s.words.any { w -> subs.any { w.text.contains(it) } && abs(w.cx - name.cx) < 0.08f && (name.cy - w.cy) in 0.015f..0.08f }
     }
 
     /** Há algum texto de subtítulo (qualquer um) logo acima do nome? Se não há, o OCR simplesmente não leu. */
@@ -113,7 +116,7 @@ class TeamSwap(
     private fun findName(s: Screen, t: Target, yMin: Float = 0f, yMax: Float = 1f, relaxed: Boolean = false): Word? =
         s.words.filter {
             matches(it, t) && it.cy in yMin..yMax &&
-                (subOk(s, it, t) || (relaxed && !hasSubtitleAbove(s, it))) &&
+                (subOk(s, it, t) || (relaxed && !t.strict && !hasSubtitleAbove(s, it))) &&
                 !badSub(s, it, t) && levelOk(s, it, t)
         }.minByOrNull { it.cx }
 
