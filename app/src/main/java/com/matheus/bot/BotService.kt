@@ -112,14 +112,23 @@ class BotService : Service() {
 
         val code = intent.getIntExtra("code", 0)
         val data = IntentCompat.getParcelableExtra(intent, "data", Intent::class.java)
-            ?: return START_NOT_STICKY
+        if (data == null) {
+            android.util.Log.e("BotService", "Permissão de captura sem os dados da projeção")
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
         val mp = getSystemService(MediaProjectionManager::class.java).getMediaProjection(code, data)
         mp.registerCallback(object : MediaProjection.Callback() {
             override fun onStop() { main.post { shutdown() } }
         }, main)
         projection = mp
 
-        OpenCVLoader.initLocal()
+        if (!OpenCVLoader.initLocal()) {
+            android.util.Log.e("BotService", "Falha ao inicializar OpenCV; encerrando o serviço")
+            shutdown()
+            return START_NOT_STICKY
+        }
         CardArt.init(this)   // referências de arte das cartas (assets/cartas); se falhar, o bot segue só com o OCR
         wm = getSystemService(WindowManager::class.java)
         val b = wm.maximumWindowMetrics.bounds
@@ -189,6 +198,7 @@ class BotService : Service() {
         val p = projection
         projection = null
         p?.stop()
+        stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
 

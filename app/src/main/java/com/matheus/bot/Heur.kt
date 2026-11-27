@@ -143,44 +143,8 @@ class Snap(val w: Int, val h: Int, private val hsv: Mat, private val gray: Mat) 
         return res
     }
 
-    /** Seta de "PASSE O DEDO RÁPIDO": direção (dx,dy; dy=+1 é para baixo), centro (cx,cy) e comprimento, tudo em proporção da tela. */
+    /** Resultado de seta: direção (dx,dy; dy=+1 é para baixo), centro e comprimento em proporção da tela. */
     class Arrow(val dx: Int, val dy: Int, val cx: Float, val cy: Float, val len: Float)
-
-    /** [minArea]/[minAspect] mais altos servem para usar a seta como gatilho (menos falso positivo). */
-    fun arrow(minArea: Double = 600.0, minAspect: Float = 1.5f): Arrow? {
-        val rect = r(0.35f, 0.15f, 0.85f, 0.92f)
-        val sub = Mat(hsv, rect)
-        val m = Mat()
-        Core.inRange(sub, Scalar(100.0, 30.0, 150.0), Scalar(135.0, 160.0, 255.0), m)
-        Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0)))
-        val cs = ArrayList<MatOfPoint>()
-        Imgproc.findContours(m.clone(), cs, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
-        val best = cs.maxByOrNull { Imgproc.contourArea(it) }
-        var out: Arrow? = null
-        if (best != null && Imgproc.contourArea(best) > minArea) {
-            val bb = Imgproc.boundingRect(best)
-            val ar = maxOf(bb.width, bb.height).toFloat() / minOf(bb.width, bb.height).coerceAtLeast(1)
-            if (ar >= minAspect) {   // seta é comprida; manchas redondas do cenário não contam
-                val mm = Mat(m, bb)
-                val cx = (rect.x + bb.x + bb.width / 2f) / w
-                val cy = (rect.y + bb.y + bb.height / 2f) / h
-                if (bb.height >= bb.width) {
-                    val n = maxOf(1, bb.height / 4)
-                    val top = Core.countNonZero(mm.rowRange(0, n))
-                    val bot = Core.countNonZero(mm.rowRange(bb.height - n, bb.height))
-                    out = Arrow(0, if (bot > top) 1 else -1, cx, cy, bb.height.toFloat() / h)
-                } else {
-                    val n = maxOf(1, bb.width / 4)
-                    val left = Core.countNonZero(mm.colRange(0, n))
-                    val right = Core.countNonZero(mm.colRange(bb.width - n, bb.width))
-                    out = Arrow(if (right > left) 1 else -1, 0, cx, cy, bb.width.toFloat() / w)
-                }
-                mm.release()
-            }
-        }
-        sub.release(); m.release()
-        return out
-    }
 
     fun release() { hsv.release(); gray.release() }
 }
@@ -248,7 +212,7 @@ object Heur {
         return out
     }
     /**
-     * Versão RÁPIDA de Snap.arrow() para o minigame PASSE O DEDO: recorta a região da seta ANTES de converter (o quadro todo
+     * Detector rápido da seta do minigame PASSE O DEDO: recorta a região antes de converter (o quadro todo
      * 2400x1080 nem chega a virar HSV nem cinza) e já reduz para a mesma escala do Snap (800 de largura no quadro cheio), então
      * os limites de área e formato são os mesmos. Devolve a seta com direção, centro e comprimento em proporção da tela.
      */
@@ -259,43 +223,60 @@ object Heur {
         val x1 = (fx1 * bmp.width).toInt().coerceIn(x0 + 1, bmp.width)
         val y1 = (fy1 * bmp.height).toInt().coerceIn(y0 + 1, bmp.height)
         val crop = Bitmap.createBitmap(bmp, x0, y0, x1 - x0, y1 - y0)
-        val rgba = Mat(); Utils.bitmapToMat(crop, rgba); crop.recycle()
-        val rgb = Mat(); Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
-        val sw = 400   // = 0,5 de 800: mesma escala do Snap
-        val sh = (rgb.rows() * sw / rgb.cols().toDouble()).toInt().coerceAtLeast(1)
-        val small = Mat(); Imgproc.resize(rgb, small, Size(sw.toDouble(), sh.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
-        val hsv = Mat(); Imgproc.cvtColor(small, hsv, Imgproc.COLOR_RGB2HSV)
-        val m = Mat()
-        Core.inRange(hsv, Scalar(100.0, 30.0, 150.0), Scalar(135.0, 160.0, 255.0), m)
-        Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0)))
-        val cs = ArrayList<MatOfPoint>()
-        Imgproc.findContours(m.clone(), cs, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
-        val best = cs.maxByOrNull { Imgproc.contourArea(it) }
-        var out: Snap.Arrow? = null
-        if (best != null && Imgproc.contourArea(best) > minArea) {
+        val rgba = Mat()
+        val rgb = Mat()
+        val small = Mat()
+        val hsv = Mat()
+        val mask = Mat()
+        val kernel = Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0))
+        val hierarchy = Mat()
+        val contours = ArrayList<MatOfPoint>()
+        try {
+            try { Utils.bitmapToMat(crop, rgba) } finally { crop.recycle() }
+            Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
+            val sw = 400   // = 0,5 de 800: mesma escala do Snap
+            val sh = (rgb.rows() * sw / rgb.cols().toDouble()).toInt().coerceAtLeast(1)
+            Imgproc.resize(rgb, small, Size(sw.toDouble(), sh.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+            Imgproc.cvtColor(small, hsv, Imgproc.COLOR_RGB2HSV)
+            Core.inRange(hsv, Scalar(100.0, 30.0, 150.0), Scalar(135.0, 160.0, 255.0), mask)
+            Imgproc.morphologyEx(mask, mask, Imgproc.MORPH_CLOSE, kernel)
+            Imgproc.findContours(mask, contours, hierarchy, Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+
+            val best = contours.maxByOrNull { Imgproc.contourArea(it) }
+            if (best == null || Imgproc.contourArea(best) <= minArea) return null
             val bb = Imgproc.boundingRect(best)
             val ar = maxOf(bb.width, bb.height).toFloat() / minOf(bb.width, bb.height).coerceAtLeast(1)
-            if (ar >= minAspect) {
-                val mm = Mat(m, bb)
+            if (ar < minAspect) return null
+
+            val mm = Mat(mask, bb)
+            try {
                 // Proporção da TELA: a região cobre x de 0,35 a 0,85 e y de 0,15 a 0,92.
                 val cx = fx0 + ((bb.x + bb.width / 2f) / sw) * (fx1 - fx0)
                 val cy = fy0 + ((bb.y + bb.height / 2f) / sh) * (fy1 - fy0)
-                if (bb.height >= bb.width) {
+                return if (bb.height >= bb.width) {
                     val n = maxOf(1, bb.height / 4)
-                    val top = Core.countNonZero(mm.rowRange(0, n))
-                    val bot = Core.countNonZero(mm.rowRange(bb.height - n, bb.height))
-                    out = Snap.Arrow(0, if (bot > top) 1 else -1, cx, cy, (bb.height.toFloat() / sh) * (fy1 - fy0))
+                    val topRow = mm.rowRange(0, n)
+                    val bottomRow = mm.rowRange(bb.height - n, bb.height)
+                    try {
+                        val top = Core.countNonZero(topRow)
+                        val bot = Core.countNonZero(bottomRow)
+                        Snap.Arrow(0, if (bot > top) 1 else -1, cx, cy, (bb.height.toFloat() / sh) * (fy1 - fy0))
+                    } finally { topRow.release(); bottomRow.release() }
                 } else {
                     val n = maxOf(1, bb.width / 4)
-                    val left = Core.countNonZero(mm.colRange(0, n))
-                    val right = Core.countNonZero(mm.colRange(bb.width - n, bb.width))
-                    out = Snap.Arrow(if (right > left) 1 else -1, 0, cx, cy, (bb.width.toFloat() / sw) * (fx1 - fx0))
+                    val leftCols = mm.colRange(0, n)
+                    val rightCols = mm.colRange(bb.width - n, bb.width)
+                    try {
+                        val left = Core.countNonZero(leftCols)
+                        val right = Core.countNonZero(rightCols)
+                        Snap.Arrow(if (right > left) 1 else -1, 0, cx, cy, (bb.width.toFloat() / sw) * (fx1 - fx0))
+                    } finally { leftCols.release(); rightCols.release() }
                 }
-                mm.release()
-            }
+            } finally { mm.release() }
+        } finally {
+            contours.forEach { it.release() }
+            hierarchy.release(); kernel.release(); mask.release(); hsv.release(); small.release(); rgb.release(); rgba.release()
         }
-        rgba.release(); rgb.release(); small.release(); hsv.release(); m.release()
-        return out
     }
 
     /**
