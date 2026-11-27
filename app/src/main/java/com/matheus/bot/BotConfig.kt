@@ -31,6 +31,11 @@ class BotConfig(ctx: Context) {
         get() = p.getInt("tossDelayMs", 600)
         set(v) = p.edit().putInt("tossDelayMs", v).apply()
 
+    /** PING PONG: quantos ms ANTES de o marcador chegar ao centro o bot manda o toque (cobre a captura e o atraso do toque). Ajuste fino. */
+    var pingLeadMs: Int
+        get() = p.getInt("pingLeadMs", 90)
+        set(v) = p.edit().putInt("pingLeadMs", v).apply()
+
     /** Quantos arrastos seguidos por rodada do combo (spam). */
     var comboSwipes: Int
         get() = p.getInt("comboSwipes", 8)

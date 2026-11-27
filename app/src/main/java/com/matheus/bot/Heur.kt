@@ -298,6 +298,34 @@ object Heur {
         return out
     }
 
+    /** PING PONG: faixa da tela com a barra (ampulheta) e a altura do quadrado branco do centro, em proporção da tela (medidas no print). */
+    const val PING_X0 = 0.54f
+    const val PING_X1 = 0.625f
+    const val PING_Y0 = 0.26f
+    const val PING_Y1 = 0.74f
+    const val PING_CENTER_Y = 0.50f
+
+    /**
+     * Perfil da barra do PING PONG: para cada uma de `bins` faixas horizontais (de cima para baixo, cobrindo PING_Y0..PING_Y1),
+     * a fração de pixels brilhantes (prata/branco/lavanda) na largura da barra. Recorta antes de converter, então é barato.
+     */
+    fun pingProfile(bmp: Bitmap, bins: Int): FloatArray {
+        val x0 = (PING_X0 * bmp.width).toInt().coerceIn(0, bmp.width - 2)
+        val y0 = (PING_Y0 * bmp.height).toInt().coerceIn(0, bmp.height - 2)
+        val x1 = (PING_X1 * bmp.width).toInt().coerceIn(x0 + 1, bmp.width)
+        val y1 = (PING_Y1 * bmp.height).toInt().coerceIn(y0 + 1, bmp.height)
+        val crop = Bitmap.createBitmap(bmp, x0, y0, x1 - x0, y1 - y0)
+        val rgba = Mat(); Utils.bitmapToMat(crop, rgba); crop.recycle()
+        val gray = Mat(); Imgproc.cvtColor(rgba, gray, Imgproc.COLOR_RGBA2GRAY)
+        val m = Mat(); Imgproc.threshold(gray, m, 150.0, 1.0, Imgproc.THRESH_BINARY)
+        val rows = Mat(); Core.reduce(m, rows, 1, Core.REDUCE_AVG, CvType.CV_32F)
+        val small = Mat(); Imgproc.resize(rows, small, Size(1.0, bins.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+        val out = FloatArray(bins)
+        small.get(0, 0, out)
+        rgba.release(); gray.release(); m.release(); rows.release(); small.release()
+        return out
+    }
+
     fun snap(bmp: Bitmap): Snap {
         val rgba = Mat()
         Utils.bitmapToMat(bmp, rgba)

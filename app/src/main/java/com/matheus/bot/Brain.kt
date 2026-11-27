@@ -576,25 +576,108 @@ class Brain(
     }
 
     /**
-     * PING PONG (texto do jogo: "TOQUE PARA ARREMESSAR"): o marcador ainda não foi mapeado (o print mostra uma barra vertical em forma de ampulheta
-     * com uma mira no centro; parece ser preciso tocar quando algo chega ao centro da mira).
-     * Por ora toca depois de um atraso configurável, na mira, e grava ~2,4 s de quadros (24 quadros) nas 2 primeiras vezes,
-     * em segundo plano, para a gente ver o movimento e acertar o momento.
+     * PING PONG (texto do jogo: "TOQUE PARA ARREMESSAR"): UM toque só, na hora em que o marcador passa pelo quadrado branco do centro
+     * da barra (ampulheta). Em vez de um atraso fixo, o bot ACOMPANHA o marcador:
+     *  1) A cada quadro lê a faixa da barra e guarda, por linha, o menor brilho já visto (o fundo parado). O marcador é o que aparece
+     *     de brilhante por cima desse fundo (Heur.pingProfile + pingMarker). Funciona para qualquer seta/linha clara que se mova.
+     *  2) Com 3 posições seguidas na mesma direção tira a velocidade e calcula quanto falta para chegar ao centro.
+     *  3) Se ele vai PARA o centro e falta pouco, espera o resto (menos `pingLeadMs`, que cobre a captura e o atraso do toque) e toca.
+     *     Se está se afastando, espera ele voltar (bate e volta). Se nunca achar o marcador (2,5 s), toca uma vez mesmo assim.
+     * Nas 2 primeiras vezes grava recortes da barra e um log em debug/ (pp*), para ajustar a medida e a antecedência.
      */
     private suspend fun pingPong(g: BotAccessibilityService, w: Int, h: Int) {
         val k = tossDebug
-        if (k < 2) {
-            tossDebug++
-            scope.launch {
-                repeat(24) { n ->
-                    cap.latest()?.let { saveDebug(it, "pingpong${k}_%02d".format(n), 60) }
-                    delay(100)
+        if (k < 2) tossDebug++
+        val rec = k < 2
+        val n = 100
+        val bg = FloatArray(n) { 1f }
+        val ts = ArrayList<Long>()
+        val ys = ArrayList<Float>()
+        val log = StringBuilder()
+        val t0 = now()
+        val lead = cfg.pingLeadMs
+        var lastBmp: Bitmap? = null
+        var frames = 0
+        var saved = 0
+        var tapped = false
+        var why = ""
+        while (currentCoroutineContext().isActive && now() - t0 < 7000) {
+            val b = cap.latest()
+            if (b == null) { delay(5); continue }
+            if (b === lastBmp) { delay(3); continue }   // quadro repetido (a tela não mudou): não conta como nova leitura
+            lastBmp = b
+            val tf = now()
+            val prof = Heur.pingProfile(b, n)
+            val y = if (frames >= 1) pingMarker(prof, bg) else null
+            for (i in 0 until n) if (prof[i] < bg[i]) bg[i] = prof[i]
+            frames++
+            if (y != null) { ts.add(tf); ys.add(y) }
+            if (rec) {
+                log.append("${tf - t0}ms y=${if (y != null) "%.3f".format(y) else "-"}\n")
+                if (saved < 40 && frames % 2 == 0) { savePingCrop(b, "pp${k}_%02d_${tf - t0}ms".format(saved)); saved++ }
+            }
+            val m = ys.size
+            if (m >= 3) {
+                val ta = ts[m - 3]; val tc = ts[m - 1]
+                val ya = ys[m - 3]; val yb = ys[m - 2]; val yc = ys[m - 1]
+                val span = tc - ta
+                if ((yb - ya) * (yc - yb) > 0f && span in 1L..300L) {   // mesma direção nos 3 pontos e pontos próximos no tempo
+                    val v = (yc - ya) / (span / 1000f)               // proporção da altura por segundo
+                    val toward = (Heur.PING_CENTER_Y - yc) * v > 0f
+                    if (toward && kotlin.math.abs(v) >= 0.05f) {
+                        val remaining = (Heur.PING_CENTER_Y - yc) / v - (now() - tc) / 1000f - lead / 1000f
+                        if (rec) log.append("  v=%.3f falta=%.3f s\n".format(v, remaining))
+                        if (remaining <= 0.12f) {
+                            if (remaining > 0f) delay((remaining * 1000f).toLong())
+                            g.tap(w * 0.565f, h * 0.48f)
+                            tapped = true
+                            why = "v=%.2f".format(v)
+                            break
+                        }
+                    }
                 }
             }
+            if (ys.isEmpty() && now() - t0 > 2500) { why = "sem marcador"; break }
         }
-        delay(cfg.tossDelayMs.toLong())
-        g.tap(w * 0.565f, h * 0.48f)
+        if (!tapped) {
+            g.tap(w * 0.565f, h * 0.48f)   // último recurso: um toque (não achou o marcador ou não alinhou a tempo)
+            if (why.isEmpty()) why = "tempo esgotado"
+        }
+        if (rec) {
+            lastBmp?.let { savePingCrop(it, "pp${k}_TAP") }
+            log.append("TOQUE aos ${now() - t0}ms (${why}), antecipação ${lead}ms\n")
+            runCatching { File(debugDir, "pingpong${k}_log_$t0.txt").writeText(log.toString()) }
+        }
+        say("Ping pong: toque ($why)")
         delay(1200)
+    }
+
+    /** Posição (proporção da altura da tela) da maior mancha que ficou mais brilhante que o fundo; null se não há marcador. */
+    private fun pingMarker(prof: FloatArray, bg: FloatArray): Float? {
+        var bestMass = 0f
+        var bestY = 0f
+        var i = 0
+        while (i < prof.size) {
+            if (prof[i] - bg[i] >= 0.15f) {
+                var j = i
+                var mass = 0f
+                var wy = 0f
+                while (j < prof.size && prof[j] - bg[j] >= 0.15f) { val d = prof[j] - bg[j]; mass += d; wy += d * (j + 0.5f); j++ }
+                if (mass > bestMass) { bestMass = mass; bestY = wy / mass }
+                i = j
+            } else i++
+        }
+        if (bestMass < 0.35f) return null
+        return Heur.PING_Y0 + bestY / prof.size * (Heur.PING_Y1 - Heur.PING_Y0)
+    }
+
+    /** Grava só a faixa da barra (pequena e rápida) para a gente conferir o movimento depois. */
+    private fun savePingCrop(b: Bitmap, tag: String) {
+        runCatching {
+            val c = Bitmap.createBitmap(b, (0.50f * b.width).toInt(), (0.22f * b.height).toInt(), (0.16f * b.width).toInt(), (0.56f * b.height).toInt())
+            saveDebug(c, tag, 70)
+            c.recycle()
+        }
     }
 
     /**
