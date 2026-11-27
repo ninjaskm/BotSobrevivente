@@ -12,7 +12,7 @@ import kotlin.math.sqrt
  * Montagem de times:
  *  - createTeam1: tela "CRIE SUA EQUIPE" (time vazio) -> arrasta Flash Reverso, Apocalipse e Nevasca para os
  *    quadrados 1, 2 e 3 -> botão CRIE SUA EQUIPE -> lobby -> grava quadros da tela de equipamentos.
- *  - run: troca do time 1 (morto) para o time 2 (EQUIPE -> 3 personagens -> CONFIRMAR ALTERAÇÕES -> lobby).
+ *  - run: troca do time 1 (morto) para o time 2 (EQUIPE -> seleciona até 3 personagens -> CONFIRMAR ALTERAÇÕES -> lobby).
  *
  * Cada passo confere o texto da tela antes de agir. Qualquer coisa diferente do esperado: salva um print
  * em debug/ e devolve a mensagem de erro (o Brain pausa).
@@ -21,6 +21,7 @@ class TeamSwap(
     private val cap: Capture,
     private val text: TextVision,
     private val cfg: BotConfig,
+    private val isPaused: () -> Boolean = { false },
     private val debug: (Bitmap, String) -> Unit,
 ) {
     /** Mensagens de progresso para o painel (o Brain liga isto ao texto do painel). */
@@ -34,97 +35,16 @@ class TeamSwap(
     /** Altura (proporção da tela) da linha do NOME das cartas na lista de baixo. */
     private val listNameY = 0.772f
 
-    // `sub`: subtítulo que a carta CERTA tem (linha pequena em cima do nome). `notSub`: subtítulo que a carta ERRADA tem.
-    // `minLevel`: nível mínimo da carta certa (número no canto superior direito da carta na lista), para separar versões.
-    // `strict`: nunca aceita a carta com o subtítulo ilegível (para quando a versão ERRADA não tem subtítulo nenhum).
-    // `sub` aceita alternativas separadas por "|" (basta ler uma delas).
-    private class Target(
-        val label: String, val key: String, val exact: Boolean,
-        val sub: String? = null, val notSub: String? = null, val minLevel: Int = 0, val strict: Boolean = false,
-        /** Palavra EXTRA (de outra parte do nome) que também vale ao procurar o item DENTRO do quadrado, quando o OCR não lê a chave. */
-        val alt: String? = null,
-        /**
-         * Palavras EXTRAS (separadas por "|") que também valem ao procurar o item na LISTA de baixo, para quando o OCR não lê a chave
-         * (nome sobre arte brilhante). Só para palavras que não existem em nenhum outro item da lista.
-         */
-        val listAlt: String? = null,
-    )
-
-    // Os 3 personagens do time 2. A POSIÇÃO na lista = quadrado de destino (1º, 2º, 3º).
-    // "BATMAN" tem que ser exato: "Batman Ninja" aparece como subtítulo em outras cartas.
-    private val targets = listOf(
-        // Existe mais de um Batman; o do time 2 tem o subtítulo "Batman Ninja" (o outro é "Entre a foice e o mart.").
-        // `strict`: nunca aceita o Batman com o subtítulo ilegível (o errado TEM subtítulo, o OCR só não leu: na 2ª rodada em diante ele
-        // era aceito como "sem subtítulo"). `notSub`: rejeita de vez se ler o subtítulo do errado ("FOICE"/"MART").
-        Target("Batman (Ninja)", "BATMAN", true, sub = "NINJA", notSub = "FOICE|MART", minLevel = 50, strict = true),
-        Target("Cavaleiro Arkham", "CAVALEIRO", false, minLevel = 50),
-        // Existe mais de um Caçador de Marte: o certo é "Noite Mais Densa" nível 50 (o outro é nível 45, sem subtítulo).
-        // A chave é "DE MARTE" (não "CACADOR"): o Lobo tem o subtítulo "Caçador de Recompensas" e era confundido com ele.
-        // ("DE MARTE" e não só "MARTE", para não casar com "martelo".)
-        Target("Caçador de Marte", "DE MARTE", false, sub = "NOITE|DENSA", minLevel = 50, strict = true),
-    )
-
-    // Os 3 do time 1, na ordem dos quadrados (foto de referência: Flash Reverso, Apocalipse, Nevasca).
-    private val team1 = listOf(
-        Target("Flash Reverso", "REVERSO", false, minLevel = 30),
-        // Existe mais de um Apocalipse; o certo tem o subtítulo "Contenção" (o outro é "Noite Mais Densa").
-        Target("Apocalipse (Contenção)", "APOCALIPSE", false, sub = "CONTEN", minLevel = 40),
-        // Existe mais de uma Nevasca: a errada tem o subtítulo "Regime" e nível 3; a certa é nível 50, sem subtítulo.
-        Target("Nevasca", "NEVASCA", false, notSub = "REGIME", minLevel = 40),
-    )
-
-    // Centro dos 3 quadrados do time, em proporção da tela (dos seus prints).
-    private val slotX = floatArrayOf(0.1375f, 0.306f, 0.476f)
-    private val slotY = 0.23f
-
-    /** Onde ficam as coisas em cada tela de arrastar (proporção da tela, dos seus prints). */
-    private class Layout(
-        val slotX: FloatArray, val slotY: Float,
-        /** Faixa de altura e distância horizontal em que o NOME do item aparece dentro do quadrado já preenchido. */
-        val slotBand: ClosedFloatingPointRange<Float>, val slotDx: Float,
-        /** Altura mínima da lista de baixo (nomes acima disso são do quadrado, não da lista). */
-        val stripMinY: Float,
-        /** Quanto acima do nome fica o corpo da carta (de onde se pega o item). */
-        val srcDy: Float,
-        /** Rolagem da lista: pega em `scrollFrom` e solta em `scrollTo` (largura da tela) = avança ~4 cartas por passo (personagens e equipamentos). */
-        val scrollFrom: Float, val scrollTo: Float,
-        /** true = o item CONTINUA na lista depois de equipado (equipamento); false = a carta sai da lista (personagem). */
-        val staysInList: Boolean,
-    )
-    private val charLayout = Layout(slotX, slotY, 0.28f..0.50f, 0.10f, 0.50f, 0.08f, 0.78f, 0.23f, false)
-    private val equipLayout = Layout(floatArrayOf(0.328f, 0.494f, 0.658f), 0.32f, 0.37f..0.47f, 0.09f, 0.62f, 0.09f, 0.765f, 0.293f, true)
-
-    // Equipamentos de cada personagem, na ordem dos quadrados 1, 2, 3 (dos seus prints de equipamentos).
-    // A chave é uma palavra da linha de cima do nome (os nomes longos quebram em 2 linhas) que não existe em outro equipamento.
-    // Palavra alternativa única de cada item (da 2ª linha do nome, que o OCR lê quando erra a 1ª): só serve para ver se o item JÁ
-    // está no quadrado. Placa/Maça/Traje não têm (as palavras deles repetem em outros itens).
-    private val gearAlt = mapOf(
-        "ARMADURA" to "LEXCORP", "RIFLE" to "PERSONALIZADO", "KAMA" to "REINO", "BASTOES" to "ESCRIMA",
-        "MANHA" to "ENESIMO", "FACAS" to "ADEPTO", "DIVINO" to "CAPACETE",
-    )
-    private fun gear(label: String, key: String) = Target(label, key, false, alt = gearAlt[key], listAlt = gearListAlt[key])
-    // Os Bastões de Escrima têm arte azul muito brilhante e o OCR não lê "Bastões": "Escrima"/"Energizados" (2ª linha) são únicos.
-    private val gearListAlt = mapOf("BASTOES" to "ESCRIMA|ENERGIZADOS")
-    private val equip2 = listOf(
-        listOf(gear("Placa Peitoral Divina do Quarto Mundo", "PLACA"), gear("Maça Divina do Quarto Mundo", "MACA"),
-            gear("Facas de Adepto da Liga dos Assassinos", "FACAS")),                       // Batman
-        listOf(gear("Rifle Personalizado", "RIFLE"), gear("Kama do Reino Inferior", "KAMA"),
-            gear("Estrela da Manhã de Metal Enésimo", "MANHA")),                              // Cavaleiro Arkham
-        listOf(gear("Bastões de Escrima Energizados", "BASTOES"), gear("Armadura Peitoral LexCorp V1", "ARMADURA"),
-            gear("Traje do Caçador de Marte", "CACADOR")),                                 // Caçador de Marte
-    )
-    private val equip1 = listOf(
-        // Dos prints de 27/11 (quadrados 1, 2, 3). "Traje de Hipervelocidade" existe em 2 versões (3★ e Revestido): a chave é "REVESTIDO".
-        listOf(gear("Rifle Personalizado", "RIFLE"), gear("Armadura Peitoral LexCorp V1", "ARMADURA"),
-            gear("Traje de Hipervelocidade Revestido", "REVESTIDO")),                       // Flash Reverso
-        listOf(gear("Bastões de Escrima Energizados", "BASTOES"), gear("Estrela da Manhã de Metal Enésimo", "MANHA"),
-            gear("Kama do Reino Inferior", "KAMA")),                                        // Apocalipse
-        listOf(gear("Placa Peitoral Divina do Quarto Mundo", "PLACA"), gear("Maça Divina do Quarto Mundo", "MACA"),
-            gear("Capacete Divino do Quarto Mundo", "DIVINO")),                             // Nevasca
-    )
-
-    // Centro da carta de cada personagem no lobby (para entrar na tela de equipamentos dele).
-    private val lobbyCardX = floatArrayOf(0.1435f, 0.305f, 0.466f)
+    // Catálogo fixo (times, equipamentos e geometria) separado da lógica de leitura e interação.
+    private val targets = TeamCatalog.targets
+    private val team1 = TeamCatalog.team1
+    private val slotX = TeamCatalog.characterSlotX
+    private val slotY = TeamCatalog.characterSlotY
+    private val charLayout = TeamCatalog.characterLayout
+    private val equipLayout = TeamCatalog.equipmentLayout
+    private val equip1 = TeamCatalog.equip1
+    private val equip2 = TeamCatalog.equip2
+    private val lobbyCardX = TeamCatalog.lobbyCardX
 
     // Arrastar o personagem/item: segura 0,9 s PARADO em cima da carta e só então move por 0,7 s. Tem que segurar bastante antes
     // de mover: um arrasto "seco" (ou com pouca espera) é lido pelo jogo como rolagem e lança a lista. Era 0,6 s e ainda aparecia
@@ -164,7 +84,7 @@ class TeamSwap(
         val end = now() + maxMs
         var prev: Set<String>? = null
         var same = 0
-        while (currentCoroutineContext().isActive && now() < end) {
+        while (currentCoroutineContext().isActive && !isPaused() && now() < end) {
             val b = cap.latest()
             if (b == null) { delay(100); continue }
             val sig = listSig(text.read(b, 0f, 0.40f, 1f, 1f))
@@ -174,9 +94,6 @@ class TeamSwap(
             delay(120)
         }
     }
-
-    /** Quantas vezes arrasta o mesmo personagem se a carta continuar na lista depois do arrasto. */
-    private val maxDragTries = 3
 
     /**
      * Fração do passo de rolagem: 1 = passo cheio (~4 cartas; sobram 2 a 3 de sobreposição para nenhuma ser pulada). Cai para 0,4
@@ -192,6 +109,8 @@ class TeamSwap(
 
     /** Textos de botão de aceitar de uma janela de confirmação depois de arrastar um equipamento (palpite; o print mostra o real). */
     private val dialogOk = setOf("SIM", "CONFIRMAR", "EQUIPAR", "TROCAR", "MOVER", "SUBSTITUIR", "OK")
+    /** Mantém a retomada após a substituição, sem tentar substituir o time outra vez se a equipagem falhar. */
+    private var secondTeamCommitted = false
 
     private fun matches(wd: Word, t: Target) = if (t.exact) wd.text == t.key else wd.text.contains(t.key)
 
@@ -222,9 +141,12 @@ class TeamSwap(
         return Screen(left.words + right.words)
     }
 
-    /** O item (pela chave ou pela palavra alternativa) aparece em QUALQUER um dos 3 quadrados? (tela de equipamentos) */
-    private fun slotHas(s: Screen, t: Target, lay: Layout): Boolean =
-        s.words.any { (matches(it, t) || altMatch(it, t)) && it.cy in lay.slotBand && it.cx in 0.15f..0.85f }
+    /** O artefato está no quadrado de destino `idx`? Não aceita o mesmo item em outro quadrado como concluído. */
+    private fun slotHas(s: Screen, t: Target, idx: Int, lay: Layout): Boolean =
+        s.words.any {
+            (matches(it, t) || altMatch(it, t)) && it.cy in lay.slotBand &&
+                abs(it.cx - lay.slotX[idx.coerceIn(0, 2)]) < lay.slotDx
+        }
 
     /** Todas as chaves de equipamento do projeto (times 1 e 2): serve para reconhecer um item que não é o esperado. */
     private val allGearKeys: List<String> by lazy { (equip1 + equip2).flatten().map { it.key }.distinct() }
@@ -428,19 +350,19 @@ class TeamSwap(
      *  2) Se não achou, 1ª rodada: arrasta a lista para a ESQUERDA, lendo a tela a cada passo, por `phaseMs`.
      *  3) Acabou o tempo (ou a lista parou de andar): PARA, espera `settleMs` e analisa de novo, parado. Achou: arrasta.
      *     Não achou: 2ª rodada, para a DIREITA. Mesmo fim: para, analisa; 3ª rodada, para a ESQUERDA (`phaseDirs`).
-     *  4) Acabou a 3ª rodada: para, analisa uma última vez e, se não achou, desiste com mensagem.
-     * Depois de arrastar um personagem: solta, volta a ANALISAR (parado). Se a carta ainda aparece na lista, o arrasto não pegou e
-     * arrasta de novo (até `maxDragTries`); se saiu da lista, está no quadrado. Se ainda há outro personagem à vista, arrasta também;
+     *  4) Acabou a 3ª rodada: para, analisa e começa outra varredura se ainda faltar algo.
+     * Depois de arrastar um personagem: solta, volta a ANALISAR (parado). Se a carta ainda aparece na lista, tenta de novo sem limite;
+     * se saiu da lista, está no quadrado. Se ainda há outro personagem à vista, arrasta também;
      * se não, CONTINUA rolando na mesma direção e rodada de onde estava (não volta ao início nem recomeça as rodadas).
-     * `emptyStart`: não muda mais nada aqui. Antes ele usava a cor do quadrado (`slotFilled`) para achar quadrado já cheio,
-     * mas o painel do bot fica em cima do quadrado 1 e a captura o inclui, então o quadrado 1 parecia sempre cheio.
+     * `substitutionMode`: usa uma trajetória de arrasto direta primeiro e uma trajetória em dois trechos como alternativa na troca do time.
+     * Na criação inicial do time, usa a trajetória em dois trechos. Equipamentos mantêm gestos próprios.
      * Devolve null se os 3 foram arrastados, ou a mensagem do que falhou.
      */
     private suspend fun pickAll(
-        g: BotAccessibilityService, list: List<Target>, emptyStart: Boolean, lay: Layout = charLayout,
+        g: BotAccessibilityService, list: List<Target>, substitutionMode: Boolean = false, lay: Layout = charLayout,
     ): String? {
         val done = BooleanArray(list.size)
-        val attempts = IntArray(list.size)
+        val attempts = LongArray(list.size)
         if (!lay.staysInList) waitListStable()   // proteção de início: só começa com a lista parada
         var dragged = -1         // último personagem arrastado ainda não confirmado (confirma na próxima leitura)
         var phase = 0            // índice em phaseDirs: 0 = 1ª rodada (esquerda), 1 = direita, 2 = 3ª (esquerda); 3 = acabou
@@ -450,7 +372,8 @@ class TeamSwap(
         var offPicker = 0
         var confirmMiss = 0      // leituras seguidas em que a confirmação do nome (antes de arrastar) não bateu
         var lastSig: Set<String> = emptySet()
-        while (currentCoroutineContext().isActive) {
+        while (currentCoroutineContext().isActive && !isPaused()) {
+            if (isPaused()) return "Troca pausada"
             val b = cap.latest()
             if (b == null) { delay(200); continue }
             // CHECAGEM RÁPIDA dos quadrados (equipamentos): lê só a faixa dos 3 quadrados (1 leitura pequena) em vez da leitura reforçada da
@@ -487,9 +410,10 @@ class TeamSwap(
                     if (done[k]) {
                         done[k] = false
                         debug(b, "equip_item_errado_${k + 1}")
-                        say("Quadrado ${k + 1} tem item errado ($wr): vou trocar por ${list[k].label}")
+                        say("Quadrado ${k + 1} tem item errado ($wr): vou trocar por ${list[k].label}.")
                     }
-                    if (attempts[k] >= 8) return fail("Equipar: o quadrado ${k + 1} continua com item errado ($wr) depois de ${attempts[k]} tentativas")
+                    if (attempts[k] == 0L || attempts[k] % 4L == 0L)
+                        say("Quadrado ${k + 1} ainda tem $wr; vou continuar tentando ${list[k].label}.")
                 }
             }
             val relaxed = phase >= 1   // da 2ª rodada em diante aceita carta com subtítulo ilegível
@@ -505,13 +429,14 @@ class TeamSwap(
                     delay(900)
                     continue
                 }
-                // Se a tela deixou de ser a de escolher equipamento (um gesto abriu outra tela), espera um pouco e, se continuar, para.
+                // Se a tela mudou ou o OCR falhou, espera e volta a reconhecer; não encerra a equipagem por uma leitura transitória.
                 if (s.has("CLASSIFICADO") || s.has("PONTUACAO")) offPicker = 0
                 else {
                     offPicker++
                     if (offPicker >= 3) {
                         debug(b, "equip_tela_outra")
-                        return fail("Equipar: depois do gesto abriu outra tela (veja debug/equip_tela_outra e equip_tentativa*)")
+                        say("Tela de equipamentos não reconhecida; tentando reconhecer de novo.")
+                        offPicker = 0
                     }
                     delay(500)
                     continue
@@ -527,22 +452,21 @@ class TeamSwap(
                         // O quadrado ficou com OUTRO item (não o pedido): não aceita; a busca abaixo arrasta o item certo por cima.
                         debug(b, "equip_item_errado")
                         say("Quadrado ${d + 1} ficou com item errado ($wrong). Tentando de novo: ${list[d].label}")
-                        if (attempts[d] >= 8) return fail("Equipar: o quadrado ${d + 1} continua com item errado ($wrong) depois de ${attempts[d]} tentativas")
+                        say("O quadrado ${d + 1} continua com $wrong; vou repetir o gesto para ${list[d].label}.")
                     } else if (lay.staysInList) {
-                        // Equipamento equipado por ESTE personagem some da lista dele (visto nas fotos); o de outro personagem continua lá até ser roubado.
-                        // Se o OCR não leu o nome no quadrado, arrasta mais 1 vez e depois aceita, guardando um print para você conferir.
-                        if (findName(s, list[d], yMin = lay.stripMinY, relaxed = relaxed) == null) done[d] = true   // saiu da lista = está no quadrado
-                        else if (slotOccupied(s, d, lay)) {
-                            // A carta continua na lista mas o quadrado tem item: provavelmente o OCR não liberou a leitura. Aceita após 2 arrastos.
-                            if (attempts[d] >= 2) { done[d] = true; debug(b, "equip_sem_confirmar") }
-                        } else if (attempts[d] >= 4) {
-                            // Quadrado VAZIO e a carta ainda na lista depois dos 4 gestos: não equipou de verdade. Falha com aviso
-                            // (antes seguia em silêncio e o quadrado ficava vazio).
-                            debug(b, "equip_falhou")
-                            return fail("Equipar: tentei 4 gestos com ${list[d].label} e o quadrado ${d + 1} continua vazio (item em uso por outro personagem? veja debug/equip_tentativa*)")
+                        // Não confunda carta fora da área visível com item equipado. Se não há confirmação no espaço,
+                        // o fluxo volta a procurar o item em toda a lista e tenta novamente quando encontrá-lo.
+                        if (attempts[d] % 4L == 0L) {
+                            debug(b, "equip_nao_confirmado")
+                            say("${list[d].label} ainda não foi confirmado no quadrado ${d + 1}; vou tentar de novo.")
                         }
+                    } else if (substitutionMode) {
+                        val selected = inSlot(s, list[d], d, lay)
+                        val stillInList = findCard(b, s, list[d], lay.stripMinY, relaxed, phase) != null
+                        if (selected || !stillInList) done[d] = true
+                        else say("${list[d].label} continua na lista; vou repetir o arrasto.")
                     } else if (findCard(b, s, list[d], lay.stripMinY, relaxed, phase) == null) done[d] = true
-                    else if (attempts[d] >= maxDragTries) return fail("Troca: arrastei ${list[d].label} $maxDragTries vezes e a carta continua na lista")
+                    else say("${list[d].label} continua na lista; vou repetir o arrasto.")
                 }
             }
             if (done.all { it }) return null
@@ -577,6 +501,7 @@ class TeamSwap(
                         w0
                     }
                 }
+                if (isPaused()) return "Troca pausada"
                 // Equipamento: pega pela linha INTEIRA do nome (centro da carta), não só pela palavra-chave, que fica mais à esquerda.
                 val c = if (lay.staysInList)
                     s.words.filter {
@@ -592,25 +517,40 @@ class TeamSwap(
                 say("Arrastando ${t.label} para o quadrado ${i + 1}")
                 attempts[i]++
                 if (lay.staysInList) {
-                    // Equipamento: ainda não sabemos qual gesto o jogo aceita (e o item pode estar em uso por outro personagem), então cada
-                    // tentativa usa um gesto diferente e guarda um print do que o jogo fez (debug/equip_tentativa*).
-                    val v = (attempts[i] - 1) % 4
-                    say("Equipando ${t.label} no quadrado ${i + 1} (gesto ${v + 1} de 4)")
-                    when (v) {
-                        0 -> g.drag(sx, sy, ex, ey, dragHoldMs, dragMoveMs)                       // segura e arrasta direto
-                        // sobe primeiro, saindo da faixa da lista (não lê como rolagem), depois vai ao quadrado
-                        1 -> g.dragVia(sx, sy, sx, b.height * 0.52f, ex, ey, dragHoldMs, 400L, 500L)
-                        2 -> { g.tap(sx, sy); delay(800); g.tap(ex, ey) }                         // toca no item e depois no quadrado
-                        else -> { g.tap(ex, ey); delay(800); g.tap(sx, sy) }                      // toca no quadrado e depois no item
+                    // Equipamento: testa quatro gestos diferentes e repete o ciclo com mais tempo de contato se nenhum for confirmado.
+                    // Cada tentativa salva um print do resultado para diagnóstico.
+                    val v = ((attempts[i] - 1) % 4).toInt()
+                    val ciclo = ((attempts[i] - 1) / 4).coerceAtMost(3L)
+                    val hold = dragHoldMs + ciclo * 300L
+                    val move = dragMoveMs + ciclo * 200L
+                    say("Equipando ${t.label} no quadrado ${i + 1} (tentativa ${attempts[i]})")
+                    val occupiedTarget = slotOccupied(s, i, lay)
+                    if (occupiedTarget) {
+                        // Se o espaço já contém um artefato, não toque nele: isso selecionava/abria o item errado.
+                        // Use somente arrastos para substituir o que está equipado.
+                        when (v) {
+                            0 -> g.drag(sx, sy, ex, ey, hold, move, 700L + ciclo * 200L)
+                            1 -> g.dragVia(sx, sy, sx, b.height * 0.52f, ex, ey, hold, 450L + ciclo * 100L, 550L + ciclo * 100L, 700L + ciclo * 200L)
+                            2 -> g.dragVia(sx, sy, sx, b.height * 0.56f, ex, ey, hold + 150L, 500L + ciclo * 100L, 650L + ciclo * 100L, 700L + ciclo * 200L)
+                            else -> g.drag(sx, sy, ex, ey, hold + 250L, move + 200L, 900L)
+                        }
+                    } else when (v) {
+                        0 -> g.drag(sx, sy, ex, ey, hold, move, 500L + ciclo * 200L)                 // segura e arrasta direto
+                        1 -> g.dragVia(sx, sy, sx, b.height * 0.52f, ex, ey, hold, 400L + ciclo * 100L, 500L + ciclo * 100L, 500L + ciclo * 200L)
+                        2 -> { g.tap(sx, sy); delay(800L + ciclo * 200L); g.tap(ex, ey) }           // slot vazio: tenta tocar no item e no destino
+                        else -> g.dragVia(sx, sy, sx, b.height * 0.56f, ex, ey, hold, 500L + ciclo * 100L, 650L + ciclo * 100L, 700L + ciclo * 200L)
                     }
                     delay(900)
                     cap.latest()?.let { debug(it, "equip_tentativa${attempts[i]}_${t.key}") }
+                } else if (substitutionMode && attempts[i] == 1L) {
+                    // Na tela de substituição, tenta primeiro um arrasto direto da carta para o espaço morto.
+                    g.drag(sx, sy, ex, ey, 650L, 700L, 650L)
                 } else {
                     // Segura PARADO em cima da carta (dragHoldMs, sem mexer o dedo), e SEM soltar sobe reto para fora da faixa da lista
                     // (assim o jogo não lê como rolagem lateral) e só depois vai até o quadrado, onde fica parado antes de soltar.
-                    g.dragVia(sx, sy, sx, b.height * 0.40f, ex, ey, dragHoldMs, 350L, 450L)
+                    g.dragVia(sx, sy, sx, b.height * 0.40f, ex, ey, dragHoldMs, 350L, 450L, 650L)
                 }
-                delay(if (lay.staysInList) 700L else 400L)   // deixa a carta assentar no quadrado
+                delay(if (lay.staysInList || substitutionMode) 700L else 400L) // deixa o arrasto assentar
                 dragged = i  // confirma na próxima leitura (a carta tem que ter saído da lista)
                 // A lista mudou (a carta saiu): zera a comparação de "parou de andar", mas continua na mesma rodada e direção.
                 if (phaseStart >= 0) phaseStart = now()
@@ -623,7 +563,7 @@ class TeamSwap(
             // (Foi o que travou o Flash: tudo já equipado, o OCR não leu o nome da armadura no quadrado e o bot rolou 3 rodadas.)
             if (lay.staysInList) {
                 for (k in list.indices) {
-                    if (!done[k] && slotHas(s, list[k], lay)) { done[k] = true; debug(b, "equip_${k + 1}_ja_equipado") }
+                    if (!done[k] && slotHas(s, list[k], k, lay)) { done[k] = true; debug(b, "equip_${k + 1}_ja_equipado") }
                 }
                 if (done.all { it }) return null
             }
@@ -655,7 +595,15 @@ class TeamSwap(
                     }
                     if (todos && done.all { it }) return null
                 }
-                return fail("Troca: não achei na lista depois de ${phaseDirs.size} rodadas: ${list.filterIndexed { k, _ -> !done[k] }.joinToString { it.label }}")
+                val missing = list.filterIndexed { k, _ -> !done[k] }.joinToString { it.label }
+                say("Ainda procurando $missing; vou reiniciar a varredura da lista.")
+                phase = 0
+                phaseStart = -1L
+                steps = 0
+                stuck = 0
+                lastSig = emptySet()
+                delay(settleMs)
+                continue
             }
             if (phaseStart < 0) phaseStart = now()   // começa a rodada de arrastos
             steps++
@@ -696,7 +644,7 @@ class TeamSwap(
             else g.scrollStop(fromX, y, toX, y, mvMs, hdMs)
             delay(charSettleMs)   // espera a lista assentar antes de ler
         }
-        return "Troca cancelada"
+        return if (isPaused()) "Troca pausada" else "Troca cancelada"
     }
 
     /**
@@ -705,7 +653,8 @@ class TeamSwap(
      * Devolve null se deu certo ou a mensagem do que falhou.
      */
     suspend fun createTeam1(g: BotAccessibilityService): String? {
-        pickAll(g, team1, emptyStart = true)?.let { return it }
+        if (isPaused()) return "Troca pausada"
+        pickAll(g, team1)?.let { return it }
         // Conferência só informativa e rápida (uma leitura, sem esperar): o jogo não deixa criar a equipe sem os 3 quadrados cheios, então
         // se algo estiver errado o lobby não aparece e o erro sai logo abaixo (com print em debug/). Antes esperava até 2,5 s aqui.
         cap.latest()?.let { b ->
@@ -715,17 +664,27 @@ class TeamSwap(
         // O botão fica no meio da tela (y ~0,33); o título "CRIE SUA EQUIPE" está colado no topo e não conta.
         // Toca bem em cima da palavra "CRIE" (lado esquerdo do botão, x ~0,65 / y ~0,335 no seu print). O x é fixo
         // porque o leitor de texto pode devolver a linha inteira e o centro dela cairia mais para a direita.
-        // Se a tela não mudar em ~4 s, toca de novo (até 3 vezes) antes de desistir.
+        // Se a tela demorar para mudar, continua relendo e tentando até aparecer o lobby.
         var lobbyOk = false
-        for (tentativa in 0 until 3) {
-            val b = cap.latest() ?: return fail("Time 1: não achei o botão CRIE SUA EQUIPE")
-            val s = text.read(b)
-            val y = first(s, "CRIE", false, 0.2f, 0.55f)?.cy ?: first(s, "EQUIPE", false, 0.2f, 0.55f)?.cy ?: 0.335f
-            g.tap(b.width * 0.65f, b.height * y)
+        while (!lobbyOk && !isPaused()) {
+            val current = cap.latest()
+            if (current == null) { delay(200); continue }
+            val currentText = text.read(current)
+            if (currentText.has("RECEBER", yMin = 0.7f) && currentText.has("EQUIPE", yMin = 0.7f)) {
+                lobbyOk = true
+                break
+            }
+            if (!currentText.has("CRIE SUA EQUIPE")) {
+                say("Aguardando a tela CRIE SUA EQUIPE ou o lobby...")
+                delay(500)
+                continue
+            }
+            val y = first(currentText, "CRIE", false, 0.2f, 0.55f)?.cy ?: 0.335f
+            g.tap(current.width * 0.65f, current.height * y)
             val r = waitText(4000, rBottom) { it.has("RECEBER", yMin = 0.7f) && it.has("EQUIPE", yMin = 0.7f) }
             if (r != null) { lobbyOk = true; break }
         }
-        if (!lobbyOk) return fail("Time 1: depois do botão não apareceu o lobby (veja debug/troca_falha)")
+        if (isPaused()) return "Troca pausada"
         delay(300)
         return equipTeam(g, equip1, team1)   // equipa Flash Reverso, Apocalipse e Nevasca (mesma lógica de arrasto, agora pelo nome do equipamento)
     }
@@ -734,7 +693,7 @@ class TeamSwap(
         timeoutMs: Long, region: FloatArray? = null, pred: (Screen) -> Boolean,
     ): Pair<Bitmap, Screen>? {
         val end = now() + timeoutMs
-        while (currentCoroutineContext().isActive && now() < end) {
+        while (currentCoroutineContext().isActive && !isPaused() && now() < end) {
             val b = cap.latest()
             if (b != null) {
                 // `region` = só lê essa faixa da tela (bem mais rápido). As posições lidas continuam em proporção da tela inteira.
@@ -742,6 +701,32 @@ class TeamSwap(
                 if (pred(s)) return b to s
             }
             delay(70)
+        }
+        return null
+    }
+
+    private fun confirmEnabled(s: Screen): Boolean =
+        s.has("CONFIRMAR") && s.has("ALTERACOES") && !s.has("NECESSARIO")
+
+    private fun isReplacementScreen(s: Screen): Boolean =
+        s.has("SUBSTITUICOES") && (s.has("CLASSIFICAR") || s.has("CONFIRMAR"))
+
+    private fun isTeamLobby(s: Screen): Boolean =
+        s.has("RECEBER", yMin = 0.7f) && s.has("EQUIPE", yMin = 0.7f)
+
+    /** Evita tocar num CONFIRMAR desativado ou num texto de confirmação de outra etapa. */
+    private suspend fun waitConfirmEnabled(timeoutMs: Long): Pair<Bitmap, Screen>? {
+        val end = now() + timeoutMs
+        var enabledFrames = 0
+        while (currentCoroutineContext().isActive && !isPaused() && now() < end) {
+            val b = cap.latest()
+            if (b != null) {
+                val s = text.read(b, rConfirm[0], rConfirm[1], rConfirm[2], rConfirm[3])
+                if (confirmEnabled(s)) {
+                    if (++enabledFrames >= 2) return b to s
+                } else enabledFrames = 0
+            }
+            delay(100)
         }
         return null
     }
@@ -757,18 +742,25 @@ class TeamSwap(
 
     /** Troca do time morto para o time 2. Devolve null se deu certo, ou a mensagem do que falhou. */
     suspend fun run(g: BotAccessibilityService): String? {
-        // 1) Lobby do time morto: toca em EQUIPE.
-        val lobby = waitText(4000, rBottom) { it.has("EQUIPE", yMin = 0.7f) }
-            ?: return fail("Troca: não achei o botão EQUIPE")
-        tapWord(g, lobby.first, lobby.second.find("EQUIPE", yMin = 0.7f)!!)
+        if (isPaused()) return "Troca pausada"
+        // Se a substituição já foi confirmada, retoma pela equipagem. Evita abrir outra vez a tela de troca após uma falha transitória.
+        if (secondTeamCommitted) return equipTeam(g, equip2, targets)
 
-        // 2) Tela de escolha de personagens.
-        waitText(6000, rConfirm) { it.has("CLASSIFICAR") || it.has("SUBSTITUICOES") || it.has("CONFIRMAR") }
-            ?: return fail("Troca: a tela de escolher personagens não apareceu")
+        // Pode estar no lobby morto (início) ou já na tela de substituição (retomada após uma tentativa parcial).
+        var page = waitText(5000) { isTeamLobby(it) || isReplacementScreen(it) }
+            ?: return if (isPaused()) "Troca pausada" else fail("Troca: ainda não reconheci o lobby nem a tela de substituição")
+        if (isTeamLobby(page.second)) {
+            val equipe = page.second.find("EQUIPE", yMin = 0.7f)
+                ?: return fail("Troca: encontrei o lobby, mas não localizei o botão EQUIPE")
+            tapWord(g, page.first, equipe)
+            page = waitText(6000) { isReplacementScreen(it) }
+                ?: return if (isPaused()) "Troca pausada" else fail("Troca: a tela de escolher personagens não apareceu")
+        }
+
         delay(300)
 
-        // 3) Arrasta os 3 para os quadrados (quadro 1, 2, 3).
-        pickAll(g, targets, emptyStart = false)?.let { return it }
+        // 3) Seleciona os personagens tocando nas cartas; o próprio jogo substitui os espaços com caveira.
+        pickAll(g, targets, substitutionMode = true)?.let { return it }
 
         // 4) Conferência SÓ informativa (uma leitura rápida, sem esperar): se o OCR não leu os nomes da carta pequena, segue mesmo
         //    assim, porque o jogo só deixa confirmar com tudo certo e o passo 6 acusa se não deu. Antes esperava até 1,5 s aqui.
@@ -777,15 +769,17 @@ class TeamSwap(
             if (!targets.withIndex().all { inSlot(s, it.value, it.index) }) debug(b, "time2_nao_li_quadrados")
         }
 
-        // 5) CONFIRMAR ALTERAÇÕES.
-        val conf = waitText(3000, rConfirm) { it.has("CONFIRMAR") }
-            ?: return fail("Troca: não achei CONFIRMAR ALTERAÇÕES")
+        // 5) Só toca quando o botão está habilitado. Desativado, o jogo mostra "É necessário pelo menos um personagem do time";
+        // após selecionar os personagens, essa mensagem some e então confirmamos a troca.
+        val conf = waitConfirmEnabled(8000)
+            ?: return if (isPaused()) "Troca pausada" else fail("Troca: CONFIRMAR ALTERAÇÕES continuou desativado após selecionar os personagens")
         tapWord(g, conf.first, conf.second.find("CONFIRMAR")!!)
 
         // 6) Volta ao lobby (botão EQUIPE e PARAR E RECEBER lá embaixo). Lê só a faixa de baixo para detectar mais rápido.
         waitText(10000, rBottom) { it.has("RECEBER", yMin = 0.7f) && it.has("EQUIPE", yMin = 0.7f) }
-            ?: return fail("Troca: não voltei ao lobby depois de confirmar")
+            ?: return if (isPaused()) "Troca pausada" else fail("Troca: não voltei ao lobby depois de confirmar")
         delay(300)
+        secondTeamCommitted = true
 
         // 7) Equipa Batman, Cavaleiro Arkham e Caçador de Marte (mesma lógica de arrasto, agora pelo nome do equipamento).
         return equipTeam(g, equip2, targets)
@@ -799,14 +793,14 @@ class TeamSwap(
         val isPicker = { s: Screen -> s.has("CLASSIFICADO") || s.has("PONTUACAO") }
         val isDetail = { s: Screen -> s.has("EQUIPAMENTO") && (s.has("MELHORAR") || s.has("SUPORTE")) }
         val isLobby = { s: Screen -> s.has("RECEBER", yMin = 0.7f) && s.has("EQUIPE", yMin = 0.7f) && !s.has("CONFIRMAR") }
-        // Até 8 voltas: olha em que tela está e faz o que falta. Se o toque no centro da carta não abre, a cada volta tenta outro
+        // Olha em que tela está e faz o que falta. Se o toque no centro da carta não abre, tenta pontos alternativos continuamente
         // ponto da carta e guarda um print do que apareceu depois de cada toque (ver debug/equip_tap*): (dx, y, longo?).
         val tapPts = listOf(
             Triple(0f, 0.48f, false), Triple(0f, 0.32f, false), Triple(0f, 0.62f, false), Triple(0f, 0.48f, true),
             Triple(-0.04f, 0.40f, false), Triple(0.04f, 0.40f, false), Triple(0f, 0.56f, true), Triple(0f, 0.40f, false),
         )
-        var tries = 0
-        repeat(8) {
+        var tries = 0L
+        while (!isPaused()) {
             val cur = waitText(4000) { isPicker(it) || isDetail(it) || isLobby(it) }
             if (cur != null) {
                 when {
@@ -820,7 +814,7 @@ class TeamSwap(
                         delay(1000)
                         val b0 = cap.latest()
                         if (b0 != null) {
-                            if (tries == 0) debug(b0, "equip_lobby_antes${idx + 1}")   // como o lobby estava antes do 1º toque
+                            if (tries == 0L) debug(b0, "equip_lobby_antes${idx + 1}")   // como o lobby estava antes do 1º toque
                             // 1º: toca no NOME do personagem na carta (achado pelo texto, logo abaixo do meio da carta). Se não
                             // abrir, tenta o nome um pouco acima; depois cai nos pontos fixos da carta. O nome fica embaixo do
                             // subtítulo ("Contenção", "Batman Ninja"), então pega a palavra mais baixa que combina.
@@ -828,16 +822,17 @@ class TeamSwap(
                             val nameW = sc.words.filter {
                                 matches(it, who) && it.cy in 0.5f..0.8f && abs(it.cx - lobbyCardX[idx.coerceIn(0, 2)]) < 0.09f
                             }.maxByOrNull { it.cy }
-                            if (nameW != null && tries < 2) {
-                                val yy = nameW.cy - (if (tries == 1) 0.03f else 0f)
+                            if (nameW != null && tries < 2L) {
+                                val yy = nameW.cy - (if (tries == 1L) 0.03f else 0f)
                                 g.tap(b0.width * nameW.cx, b0.height * yy)
                             } else {
-                                val (dx, ty, long) = tapPts[(if (nameW != null) tries - 2 else tries) % tapPts.size]
+                                val tapIndex = ((if (nameW != null) tries - 2 else tries) % tapPts.size).toInt()
+                                val (dx, ty, long) = tapPts[tapIndex]
                                 g.tap(b0.width * (lobbyCardX[idx.coerceIn(0, 2)] + dx), b0.height * ty, if (long) 450L else 40L)
                             }
                             tries++
                             delay(1300)
-                            if (tries <= 6) cap.latest()?.let { debug(it, "equip_tap${idx + 1}_n${tries}") }
+                            if (tries <= 6L) cap.latest()?.let { debug(it, "equip_tap${idx + 1}_n${tries}") }
                         } else delay(900)
                     }
                 }
@@ -853,18 +848,32 @@ class TeamSwap(
 
     private var openInfo = ""
 
-    /** Sai: na escolha de equipamentos o botão é CANCELAR/VOLTAR; na tela do personagem é VOLTAR. Até 3 toques até o lobby. */
-    private suspend fun exitToLobby(g: BotAccessibilityService) {
-        repeat(3) {
-            // O lobby também tem um botão CANCELAR no canto (visto no seu print): se já estamos no lobby, NÃO toca nele.
-            // Lê só a faixa de baixo (os botões ficam lá): bem mais rápido que a tela inteira.
-            val atual = cap.latest()?.let { text.read(it, rBottom[0], rBottom[1], rBottom[2], rBottom[3]) }
-            if (atual != null && atual.has("RECEBER", yMin = 0.7f) && atual.has("EQUIPE", yMin = 0.7f)) return
-            val bk = waitText(2500, rBack) { it.has("CANCELAR", yMin = 0.85f) || it.has("VOLTAR", yMin = 0.85f) } ?: return
-            val wd = bk.second.find("CANCELAR", yMin = 0.85f) ?: bk.second.find("VOLTAR", yMin = 0.85f)!!
-            tapWord(g, bk.first, wd)
-            if (waitText(3000, rBottom) { it.has("RECEBER", yMin = 0.7f) && it.has("EQUIPE", yMin = 0.7f) } != null) return
+    /** Sai da seleção de equipamento e, se ela voltar aos detalhes do personagem, toca CANCELAR mais uma vez até chegar ao lobby. */
+    private suspend fun exitToLobby(g: BotAccessibilityService): Boolean {
+        while (!isPaused()) {
+            val b = cap.latest()
+            if (b == null) { delay(200); continue }
+            val s = text.read(b)
+            // O lobby tem CANCELAR também; confirme RECEBER + EQUIPE antes de qualquer toque para não sair dele.
+            if (isTeamLobby(s)) return true
+
+            val detail = s.has("EQUIPAMENTO") && s.hasAny("SUPORTE", "MELHORIAS", "NIVEL ATUAL", "CRITICO")
+            val back = s.find("CANCELAR", yMin = 0.82f) ?: s.find("VOLTAR", yMin = 0.82f)
+            if (back != null) {
+                say(if (detail) "Detalhes do personagem: voltando ao lobby..." else "Equipamentos: voltando ao lobby...")
+                g.tap(back.cx * b.width, back.cy * b.height)
+            } else if (detail) {
+                // A palavra pode falhar no OCR, mas a tela de detalhes tem o botão CANCELAR fixo no canto inferior esquerdo.
+                say("Botão de voltar não lido nos detalhes; tocando no botão inferior conhecido.")
+                g.tap(b.width * 0.14f, b.height * 0.94f)
+            } else {
+                say("Aguardando o botão de voltar da tela de equipamentos...")
+                delay(700)
+                continue
+            }
+            delay(700)
         }
+        return false
     }
 
     /**
@@ -875,14 +884,38 @@ class TeamSwap(
      */
     private suspend fun equipTeam(g: BotAccessibilityService, loadout: List<List<Target>>, chars: List<Target>): String? {
         for (idx in 0 until 3) {
-            say("Equipando o personagem ${idx + 1}...")
-            openEquip(g, idx, chars[idx]) ?: return fail("Equipar: não abri a tela de equipamentos do personagem ${idx + 1}. Vi: $openInfo")
-            delay(250)
-            pickAll(g, loadout[idx], emptyStart = false, lay = equipLayout)?.let { return it }
-            delay(60)
-            cap.latest()?.let { debug(it, "equip_p${idx + 1}_final") }   // para você conferir como ficou
-            exitToLobby(g)
-            delay(800)   // deixa o lobby assentar antes de entrar no próximo personagem
+            var characterDone = false
+            var retries = 0
+            while (!characterDone && !isPaused()) {
+                retries++
+                say("Equipando o personagem ${idx + 1} (tentativa $retries)...")
+                val picker = openEquip(g, idx, chars[idx])
+                if (picker == null) {
+                    if (isPaused()) return "Equipamento pausado"
+                    say("Não reconheci a tela de equipamentos; vou tentar de novo.")
+                    delay(1200)
+                    continue
+                }
+                delay(250)
+                val error = pickAll(g, loadout[idx], lay = equipLayout)
+                if (error != null) {
+                    if (isPaused()) return error
+                    say("$error. Vou repetir a equipagem deste personagem.")
+                    delay(1000)
+                    continue
+                }
+                delay(60)
+                cap.latest()?.let { debug(it, "equip_p${idx + 1}_final") }
+                if (!exitToLobby(g)) {
+                    if (isPaused()) return "Equipamento pausado"
+                    say("Não consegui voltar ao lobby; vou tentar novamente.")
+                    delay(1000)
+                    continue
+                }
+                delay(800)   // deixa o lobby assentar antes de entrar no próximo personagem
+                characterDone = true
+            }
+            if (isPaused()) return "Equipamento pausado"
         }
         return null
     }
