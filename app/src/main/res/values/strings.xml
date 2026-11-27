@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Bot Sobrevivente</string>
+    <string name="acc_desc">Executa toques e arrastos para o bot jogar por você.</string>
+</resources>
