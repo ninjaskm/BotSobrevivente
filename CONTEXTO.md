@@ -7,7 +7,7 @@ Abra só as seções da tarefa. Se a leitura falhar ou vier cortada, peça ao au
 
 ## Regras que não podem ser quebradas
 1. Fotos de referência: usar as versões reduzidas primeiro (seção 1).
-2. O bot reconhece a tela sozinho (texto por OCR e forma/cor). Não usar marcação manual de botões nem calibração (ver README.md).
+2. O bot reconhece a tela automaticamente por texto (OCR) e forma/cor. Não depender de marcação manual de botões nem de calibração manual de coordenadas; os pontos de ação são relativos à tela (ver `README.md`).
 
 ## Índice
 - Seção 1 — Fotos de referência. Ler antes de abrir qualquer imagem do jogo.

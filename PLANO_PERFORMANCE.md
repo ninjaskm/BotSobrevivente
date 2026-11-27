@@ -12,7 +12,8 @@ Base: código real em `app/src/main/java/com/matheus/bot/`. Onde o `README.md` d
 | 2 — Percepção em paralelo | **Código pronto.** Falta validar no celular (critérios abaixo). |
 | 3 — Ping pong e latência do toque | **Código pronto.** Falta validar no celular. |
 | 4 — Personagem pela arte (passo A, OpenCV) | **Código pronto.** Falta validar no celular e calibrar os limites com `debug/arte_scores.txt`. |
-| 5 a 7 | Não iniciadas. |
+| 5 a 6 | Não iniciadas. |
+| 7 — Higiene e robustez | **Parcialmente concluída.** Logs de sessão e atualização do README já existem; `Snap.arrow()` segue sem uso e o ciclo de `team`/`fights` ainda não foi redefinido para uma nova execução dentro do mesmo serviço. |
 
 **Nada foi compilado nem testado no celular.** O primeiro passo é abrir no Android Studio, dar o Sync e corrigir qualquer erro de compilação.
 
@@ -204,12 +205,12 @@ Aceite: `ocr` no `perf.txt` cai em chamadas por segundo durante o combate, sem q
 
 ---
 
-### Fase 7 — Higiene e robustez (pode ser feita junto com qualquer fase)
+### Fase 7 — Higiene e robustez (pode ser feita junto com qualquer fase) — PARCIAL
 
-- [ ] `Brain.start()`: zerar `team` e `fights` quando começar um **novo ciclo** (e documentar que pausar/continuar não zera).
-- [ ] Remover `Snap.arrow()` sem uso (ou marcar como legado).
-- [ ] Atualizar o `README.md` (ping pong rastreado, `Perf`, vigia, lotes de arrasto, novos campos de configuração, `dragHoldMs = 900`).
-- [ ] Log de sessão em `debug/sessao_*.txt` (lutas, minigames vistos/acertados, trocas de time, erros).
+- [ ] Definir o que caracteriza um **novo ciclo**. Hoje `Brain.start()` zera `fights` apenas ao criar o laço pela primeira vez; pausar/continuar preserva a contagem e o time. `team` começa em 1 na criação do `Brain` e não é reiniciado durante a vida do serviço.
+- [x] Manter `Snap.arrow()` identificado como legado: a seta usa `Heur.arrowFast`; o método não tem chamadas no código atual.
+- [x] Atualizar o `README.md` com ping pong rastreado, `Perf`, vigia, lotes, configurações e `dragHoldMs = 900`.
+- [x] Log de sessão em `debug/sessao_*.txt` com contadores de lutas, poderes, minigames, watchdog e tempo de combate. **Limite atual:** não há contadores específicos de trocas de time nem de erros; adicionar apenas se essas métricas forem necessárias.
 
 ---
 
@@ -290,5 +291,5 @@ Pasta: `C:\Users\teteu\Downloads\fotos` (use as `*_reduzida.jpg` quando houver).
 - [ ] Fase 4: personagem pela arte com ≥ 99%.
 - [ ] Fase 5 (se o portão exigir): detector no app com fallback.
 - [ ] Fase 6: OCR enxuto.
-- [ ] Fase 7: higiene e `README.md` atualizado.
+- [ ] Fase 7: decidir/resetar estado para novo ciclo; higiene restante (o README e o log de sessão já estão atualizados).
 - [ ] 20 lutas seguidas e 1 troca de time completa sem intervenção.
