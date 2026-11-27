@@ -74,11 +74,13 @@ class TextVision {
         val src = if (inv > 1f)
             Bitmap.createScaledBitmap(cropped, maxW, (cropped.height / inv).toInt().coerceAtLeast(1), true)
         else cropped
+        val tOcr = System.nanoTime()
         val res = suspendCancellableCoroutine<com.google.mlkit.vision.text.Text?> { c ->
             rec.process(InputImage.fromBitmap(src, 0))
                 .addOnSuccessListener { if (c.isActive) c.resume(it) }
                 .addOnFailureListener { if (c.isActive) c.resume(null) }
         }
+        Perf.addUs("ocr ${src.width}x${src.height}", (System.nanoTime() - tOcr) / 1000)
         val out = ArrayList<Word>()
         res?.textBlocks?.forEach { blk ->
             blk.lines.forEach { line ->

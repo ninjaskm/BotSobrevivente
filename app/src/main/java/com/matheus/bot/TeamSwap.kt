@@ -20,10 +20,19 @@ import kotlin.math.sqrt
 class TeamSwap(
     private val cap: Capture,
     private val text: TextVision,
+    private val cfg: BotConfig,
     private val debug: (Bitmap, String) -> Unit,
 ) {
     /** Mensagens de progresso para o painel (o Brain liga isto ao texto do painel). */
     var say: (String) -> Unit = {}
+
+    /** Linhas de diagnóstico da arte das cartas (o Brain grava em debug/arte_scores.txt). */
+    var artLog: (String) -> Unit = {}
+    private val artSaved = HashMap<String, Int>()
+    private val artLogAt = HashMap<String, Long>()
+
+    /** Altura (proporção da tela) da linha do NOME das cartas na lista de baixo. */
+    private val listNameY = 0.772f
 
     // `sub`: subtítulo que a carta CERTA tem (linha pequena em cima do nome). `notSub`: subtítulo que a carta ERRADA tem.
     // `minLevel`: nível mínimo da carta certa (número no canto superior direito da carta na lista), para separar versões.
@@ -123,23 +132,48 @@ class TeamSwap(
     private val dragHoldMs = 900L
     private val dragMoveMs = 700L
 
-    // Rolagem da lista de PERSONAGENS: 3,5x mais rápida que a dos equipamentos (350 ms de movimento + 200 ms parado no fim + 250 ms de espera
-    // antes de ler viraram 100 + 57 + 70). Os equipamentos continuam com os tempos antigos.
-    private val charScrollMoveMs = (350 / 3.5).toLong()
-    private val charScrollHoldMs = (200 / 3.5).toLong()
-    private val charSettleMs = (250 / 3.5).toLong()
+    // Rolagem da lista (personagens E equipamentos, mesmos valores pedidos): movimento 190 ms + parado no fim 110 ms + espera antes de ler 125 ms.
+    // Referência: os equipamentos usavam 350 + 200 + 300; os personagens já foram 100 + 57 + 70 (rápido demais).
+    private val charScrollMoveMs = 190L
+    private val charScrollHoldMs = 110L
+    private val charSettleMs = 125L
+
+    // Faixas da tela (x0, y0, x1, y1) para ler só onde o botão está: o OCR da tela inteira é bem mais lento.
+    private val rBottom = floatArrayOf(0f, 0.6f, 1f, 1f)       // RECEBER / EQUIPE do lobby
+    private val rBack = floatArrayOf(0f, 0.8f, 1f, 1f)         // CANCELAR / VOLTAR
+    private val rConfirm = floatArrayOf(0.4f, 0.05f, 1f, 0.5f) // CLASSIFICAR / SUBSTITUIÇÕES / CONFIRMAR ALTERAÇÕES
 
     /**
-     * Quanto tempo cada rodada de arrastos dura antes de parar e analisar de novo (ajustar nos testes). Uma rodada também
-     * termina antes se a lista parar de andar (chegou ao fim naquela direção).
+     * Quanto tempo cada rodada de arrastos dura antes de parar e analisar de novo (configurável no app, `phaseSec`; era 50 s fixos).
+     * Uma rodada também termina antes se a lista parar de andar (chegou ao fim naquela direção).
      */
-    private val phaseMs = 50_000L
+    private val phaseMs: Long get() = cfg.phaseSec.coerceIn(3, 120) * 1000L
 
     /** Parada (lista solta, sem arrastar) antes de analisar de novo ao fim de cada rodada. */
     private val settleMs = 500L
 
     /** As rodadas de arrasto, em ordem: -1 = arrasta para a ESQUERDA (avança na lista), +1 = para a DIREITA (volta). */
     private val phaseDirs = intArrayOf(-1, +1, -1)
+
+    /**
+     * PROTEÇÃO DE INÍCIO (personagens): antes de analisar e arrastar, espera a tela terminar a animação de entrada: só segue quando 2 leituras
+     * seguidas da lista têm as mesmas cartas (no máximo 2 s; passou disso, segue assim mesmo). Sem isso o bot podia começar a rolar
+     * enquanto a lista ainda estava entrando na tela.
+     */
+    private suspend fun waitListStable(maxMs: Long = 2000L) {
+        val end = now() + maxMs
+        var prev: Set<String>? = null
+        var same = 0
+        while (currentCoroutineContext().isActive && now() < end) {
+            val b = cap.latest()
+            if (b == null) { delay(100); continue }
+            val sig = listSig(text.read(b, 0f, 0.40f, 1f, 1f))
+            val p = prev
+            if (p != null && sameList(sig, p)) { same++; if (same >= 2) return } else same = 0
+            prev = sig
+            delay(120)
+        }
+    }
 
     /** Quantas vezes arrasta o mesmo personagem se a carta continuar na lista depois do arrasto. */
     private val maxDragTries = 3
@@ -148,8 +182,11 @@ class TeamSwap(
      * Fração do passo de rolagem: 1 = passo cheio (~4 cartas; sobram 2 a 3 de sobreposição para nenhuma ser pulada). Cai para 0,4
      * (~1,6 carta) se um passo andar demais (ver a segurança em pickAll). Uma para os personagens e outra para os equipamentos.
      */
-    @Volatile private var charStepScale = 1f
-    @Volatile private var equipStepScale = 1f
+    // COMEÇA em 0,4: o passo cheio (1) fazia a lista disparar no 1º arrasto depois de abrir o app, e só DEPOIS o freio de "passo grande
+    // demais" (em pickAll) baixava para 0,4, que era o arrasto "normal". Como o freio vale só enquanto o app está aberto, todo início
+    // começava brusco. Agora já começa no valor que funciona (o freio continua lá caso 0,4 ainda ande demais).
+    @Volatile private var charStepScale = 0.4f
+    @Volatile private var equipStepScale = 0.4f
 
     private fun now() = System.currentTimeMillis()
 
@@ -282,6 +319,54 @@ class TeamSwap(
         return lv >= t.minLevel
     }
 
+    /**
+     * Acha a carta do personagem na lista de baixo usando TEXTO + ARTE (CardArt). Devolve uma "palavra" na posição do nome da carta,
+     * como o findName, então o resto do fluxo (arrastar pelo corpo da carta acima do nome) não muda.
+     *  - O texto achou a carta: no modo 2 e nas duas primeiras rodadas, se a arte nessa posição for claramente de OUTRA versão
+     *    (pontuação < artVeto), rejeita. Na 3ª rodada vale só o texto (válvula de segurança se a arte estiver mal calibrada).
+     *  - O texto NÃO achou (nome ilegível sobre arte brilhante, subtítulo não lido): a arte decide se a pontuação for >= artAccept;
+     *    o nível lido e o subtítulo da versão errada ainda valem.
+     * Sem referência de arte para o personagem, ou modo 0: igual ao findName.
+     */
+    private fun findCard(b: Bitmap, s: Screen, t: Target, yMin: Float, relaxed: Boolean, phase: Int): Word? {
+        val ocr = findName(s, t, yMin = yMin, relaxed = relaxed)
+        if (cfg.artMode <= 0 || !CardArt.has(t.key)) return ocr
+        val acc = cfg.artAccept / 100f
+        val veto = cfg.artVeto / 100f
+        if (ocr != null) {
+            val sc = CardArt.scoreNear(b, t.key, ocr.cx) ?: return ocr
+            if (cfg.artMode >= 2 && phase < 2 && sc < veto) {
+                artLogThrottled("veto_${t.key}", "VETO ${t.label}: o texto achou em x=${"%.3f".format(ocr.cx)}, mas a arte pontuou ${"%.2f".format(sc)} (< ${"%.2f".format(veto)}) rodada=${phase + 1}")
+                return null
+            }
+            return ocr
+        }
+        val h = CardArt.best(b, t.key) ?: return null
+        if (h.score < acc) return null
+        val w = Word(t.key, h.cx, listNameY, 0.10f, 0.03f)
+        if (!levelOk(s, w, t) || badSub(s, w, t)) return null
+        artLogThrottled("ok_${t.key}", "ACEITO ${t.label} só pela arte: x=${"%.3f".format(h.cx)} pontuação=${"%.2f".format(h.score)} (>= ${"%.2f".format(acc)}) rodada=${phase + 1}")
+        val n = artSaved.getOrDefault(t.key, 0)
+        if (n < 3) { artSaved[t.key] = n + 1; debug(b, "arte_aceito_${t.key.replace(' ', '_')}") }   // print para você conferir a carta aceita
+        return w
+    }
+
+    private fun artLogThrottled(tag: String, msg: String) {
+        val n = now()
+        if (n - (artLogAt[tag] ?: 0L) < 2000) return
+        artLogAt[tag] = n
+        artLog(msg)
+    }
+
+    /** Nas paradas para analisar: grava a melhor pontuação da arte de cada personagem que falta (para calibrar artAccept/artVeto). */
+    private fun logArtScores(b: Bitmap, list: List<Target>, done: BooleanArray, phase: Int) {
+        if (cfg.artMode <= 0) return
+        val parts = list.indices.filter { !done[it] && CardArt.has(list[it].key) }.mapNotNull { k ->
+            CardArt.best(b, list[k].key)?.let { "${list[k].key}=${"%.2f".format(it.score)}@${"%.2f".format(it.cx)}" }
+        }
+        if (parts.isNotEmpty()) artLogThrottled("parada", "parada rodada=${phase + 1} " + parts.joinToString(" "))
+    }
+
     /** Palavra mais à esquerda que combina com a chave dentro da faixa de altura dada. */
     private fun first(s: Screen, key: String, exact: Boolean, yMin: Float = 0f, yMax: Float = 1f): Word? =
         s.words.filter { (if (exact) it.text == key else it.text.contains(key)) && it.cy in yMin..yMax }
@@ -356,6 +441,7 @@ class TeamSwap(
     ): String? {
         val done = BooleanArray(list.size)
         val attempts = IntArray(list.size)
+        if (!lay.staysInList) waitListStable()   // proteção de início: só começa com a lista parada
         var dragged = -1         // último personagem arrastado ainda não confirmado (confirma na próxima leitura)
         var phase = 0            // índice em phaseDirs: 0 = 1ª rodada (esquerda), 1 = direita, 2 = 3ª (esquerda); 3 = acabou
         var phaseStart = -1L     // -1 = rodada ainda não começou: primeiro só analisa a tela, parado
@@ -367,6 +453,15 @@ class TeamSwap(
         while (currentCoroutineContext().isActive) {
             val b = cap.latest()
             if (b == null) { delay(200); continue }
+            // CHECAGEM RÁPIDA dos quadrados (equipamentos): lê só a faixa dos 3 quadrados (1 leitura pequena) em vez da leitura reforçada da
+            // lista inteira (3 leituras). Se os 3 já têm o item certo, termina na hora (e o bot toca em CANCELAR logo); é também o que
+            // confirma mais rápido cada arrasto. Se não, segue para a leitura completa abaixo.
+            // Só nas paradas (antes de começar a rolar e logo depois de arrastar): rolando, os quadrados não mudam e isto só atrasaria.
+            if (lay.staysInList && (phaseStart < 0 || dragged >= 0)) {
+                val q = text.read(b, 0.15f, 0.28f, 0.85f, 0.52f)
+                for (i in list.indices) if (!done[i] && inSlot(q, list[i], i, lay)) done[i] = true
+                if (done.all { it }) return null
+            }
             // Enquanto só está ROLANDO a lista, lê apenas a faixa de baixo (a lista): personagens, ~40% menos pixels; equipamentos, sem o
             // quadro inteiro. Nas paradas para analisar (início de rodada, depois de arrastar, fim das rodadas) lê a tela toda (quadrados).
             val rolling = phaseStart >= 0 && dragged < 0
@@ -376,6 +471,7 @@ class TeamSwap(
                 rolling -> text.read(b, 0f, 0.40f, 1f, 1f)
                 else -> text.read(b)
             }
+            if (!lay.staysInList && !rolling) logArtScores(b, list, done, phase)
             for (i in list.indices) {
                 if (!done[i] && inSlot(s, list[i], i, lay)) {
                     done[i] = true
@@ -445,24 +541,32 @@ class TeamSwap(
                             debug(b, "equip_falhou")
                             return fail("Equipar: tentei 4 gestos com ${list[d].label} e o quadrado ${d + 1} continua vazio (item em uso por outro personagem? veja debug/equip_tentativa*)")
                         }
-                    } else if (findName(s, list[d], yMin = lay.stripMinY, relaxed = relaxed) == null) done[d] = true
+                    } else if (findCard(b, s, list[d], lay.stripMinY, relaxed, phase) == null) done[d] = true
                     else if (attempts[d] >= maxDragTries) return fail("Troca: arrastei ${list[d].label} $maxDragTries vezes e a carta continua na lista")
                 }
             }
             if (done.all { it }) return null
 
-            val i = list.indices.firstOrNull { !done[it] && findName(s, list[it], yMin = lay.stripMinY, relaxed = relaxed) != null }
+            // Personagens: texto + arte (findCard). Equipamentos: só texto, como antes.
+            val found = HashMap<Int, Word>()
+            for (k in list.indices) {
+                if (done[k]) continue
+                val fw = if (lay.staysInList) findName(s, list[k], yMin = lay.stripMinY, relaxed = relaxed)
+                else findCard(b, s, list[k], lay.stripMinY, relaxed, phase)
+                if (fw != null) found[k] = fw
+            }
+            val i = list.indices.firstOrNull { found.containsKey(it) }
             if (i != null) {
                 val t = list[i]
-                val w0 = findName(s, t, yMin = lay.stripMinY, relaxed = relaxed)!!
+                val w0 = found.getValue(i)
                 // Personagens: ANTES de arrastar confirma o NOME num quadro NOVO (a leitura de cima pode ser de uns 0,3 s atrás e a lista
                 // pode ter mexido). Se o personagem certo não está mais ali (ou andou), não arrasta: volta a analisar. Usa a posição
                 // nova. Depois de 3 conferências seguidas sem bater, arrasta mesmo assim com a leitura de cima (já tem versão e nível conferidos).
                 val w = if (lay.staysInList) w0 else {
                     val b2 = cap.latest()
                     val s2 = if (b2 != null) text.read(b2, 0f, 0.40f, 1f, 1f) else null
-                    val w2 = if (s2 != null) findName(s2, t, yMin = lay.stripMinY, relaxed = relaxed) else null
-                    if (w2 != null && abs(w2.cx - w0.cx) <= 0.03f && abs(w2.cy - w0.cy) <= 0.03f) {
+                    val w2 = if (s2 != null && b2 != null) findCard(b2, s2, t, lay.stripMinY, relaxed, phase) else null
+                    if (w2 != null && abs(w2.cx - w0.cx) <= 0.05f && abs(w2.cy - w0.cy) <= 0.03f) {
                         confirmMiss = 0
                         w2
                     } else if (++confirmMiss < 3) {
@@ -586,11 +690,11 @@ class TeamSwap(
             val half = (lay.scrollFrom - lay.scrollTo) / 2f * sc
             val fromX = b.width * (mid + half)
             val toX = b.width * (mid - half)
-            val mvMs = if (lay.staysInList) 350L else charScrollMoveMs
-            val hdMs = if (lay.staysInList) 200L else charScrollHoldMs
+            val mvMs = charScrollMoveMs   // mesmos tempos para personagens e equipamentos
+            val hdMs = charScrollHoldMs
             if (dir > 0) g.scrollStop(toX, y, fromX, y, mvMs, hdMs)
             else g.scrollStop(fromX, y, toX, y, mvMs, hdMs)
-            delay(if (lay.staysInList) 300L else charSettleMs)   // espera a lista assentar antes de ler
+            delay(charSettleMs)   // espera a lista assentar antes de ler
         }
         return "Troca cancelada"
     }
@@ -602,10 +706,12 @@ class TeamSwap(
      */
     suspend fun createTeam1(g: BotAccessibilityService): String? {
         pickAll(g, team1, emptyStart = true)?.let { return it }
-        // Conferência só informativa: o jogo não deixa criar a equipe sem os 3 quadrados cheios, então se algo estiver
-        // errado o lobby não aparece e o erro sai logo abaixo (com print em debug/).
-        val vis = waitText(2500) { s -> team1.withIndex().all { inSlot(s, it.value, it.index) } }
-        if (vis == null) cap.latest()?.let { debug(it, "time1_nao_li_quadrados") }
+        // Conferência só informativa e rápida (uma leitura, sem esperar): o jogo não deixa criar a equipe sem os 3 quadrados cheios, então
+        // se algo estiver errado o lobby não aparece e o erro sai logo abaixo (com print em debug/). Antes esperava até 2,5 s aqui.
+        cap.latest()?.let { b ->
+            val s = text.read(b, 0f, 0f, 1f, 0.5f)
+            if (!team1.withIndex().all { inSlot(s, it.value, it.index) }) debug(b, "time1_nao_li_quadrados")
+        }
         // O botão fica no meio da tela (y ~0,33); o título "CRIE SUA EQUIPE" está colado no topo e não conta.
         // Toca bem em cima da palavra "CRIE" (lado esquerdo do botão, x ~0,65 / y ~0,335 no seu print). O x é fixo
         // porque o leitor de texto pode devolver a linha inteira e o centro dela cairia mais para a direita.
@@ -616,23 +722,26 @@ class TeamSwap(
             val s = text.read(b)
             val y = first(s, "CRIE", false, 0.2f, 0.55f)?.cy ?: first(s, "EQUIPE", false, 0.2f, 0.55f)?.cy ?: 0.335f
             g.tap(b.width * 0.65f, b.height * y)
-            val r = waitText(4000) { it.has("RECEBER", yMin = 0.7f) && it.has("EQUIPE", yMin = 0.7f) && !it.has("CONFIRMAR") }
+            val r = waitText(4000, rBottom) { it.has("RECEBER", yMin = 0.7f) && it.has("EQUIPE", yMin = 0.7f) }
             if (r != null) { lobbyOk = true; break }
         }
         if (!lobbyOk) return fail("Time 1: depois do botão não apareceu o lobby (veja debug/troca_falha)")
-        delay(800)
+        delay(300)
         return equipTeam(g, equip1, team1)   // equipa Flash Reverso, Apocalipse e Nevasca (mesma lógica de arrasto, agora pelo nome do equipamento)
     }
 
-    private suspend fun waitText(timeoutMs: Long, pred: (Screen) -> Boolean): Pair<Bitmap, Screen>? {
+    private suspend fun waitText(
+        timeoutMs: Long, region: FloatArray? = null, pred: (Screen) -> Boolean,
+    ): Pair<Bitmap, Screen>? {
         val end = now() + timeoutMs
         while (currentCoroutineContext().isActive && now() < end) {
             val b = cap.latest()
             if (b != null) {
-                val s = text.read(b)
+                // `region` = só lê essa faixa da tela (bem mais rápido). As posições lidas continuam em proporção da tela inteira.
+                val s = if (region == null) text.read(b) else text.read(b, region[0], region[1], region[2], region[3])
                 if (pred(s)) return b to s
             }
-            delay(200)
+            delay(70)
         }
         return null
     }
@@ -649,32 +758,34 @@ class TeamSwap(
     /** Troca do time morto para o time 2. Devolve null se deu certo, ou a mensagem do que falhou. */
     suspend fun run(g: BotAccessibilityService): String? {
         // 1) Lobby do time morto: toca em EQUIPE.
-        val lobby = waitText(4000) { it.has("EQUIPE", yMin = 0.7f) }
+        val lobby = waitText(4000, rBottom) { it.has("EQUIPE", yMin = 0.7f) }
             ?: return fail("Troca: não achei o botão EQUIPE")
         tapWord(g, lobby.first, lobby.second.find("EQUIPE", yMin = 0.7f)!!)
 
         // 2) Tela de escolha de personagens.
-        waitText(6000) { it.has("CLASSIFICAR") || it.has("SUBSTITUICOES") || it.has("CONFIRMAR") }
+        waitText(6000, rConfirm) { it.has("CLASSIFICAR") || it.has("SUBSTITUICOES") || it.has("CONFIRMAR") }
             ?: return fail("Troca: a tela de escolher personagens não apareceu")
-        delay(500)
+        delay(300)
 
         // 3) Arrasta os 3 para os quadrados (quadro 1, 2, 3).
         pickAll(g, targets, emptyStart = false)?.let { return it }
 
-        // 4) Confere (só informativo) se os 3 estão nos quadrados antes de confirmar. Se o OCR não leu os nomes da
-        //    carta pequena, segue mesmo assim: o jogo só deixa confirmar com tudo certo e o passo 6 acusa se não deu.
-        val vis = waitText(1500) { s -> targets.withIndex().all { inSlot(s, it.value, it.index) } }
-        if (vis == null) cap.latest()?.let { debug(it, "time2_nao_li_quadrados") }
+        // 4) Conferência SÓ informativa (uma leitura rápida, sem esperar): se o OCR não leu os nomes da carta pequena, segue mesmo
+        //    assim, porque o jogo só deixa confirmar com tudo certo e o passo 6 acusa se não deu. Antes esperava até 1,5 s aqui.
+        cap.latest()?.let { b ->
+            val s = text.read(b, 0f, 0f, 1f, 0.5f)
+            if (!targets.withIndex().all { inSlot(s, it.value, it.index) }) debug(b, "time2_nao_li_quadrados")
+        }
 
         // 5) CONFIRMAR ALTERAÇÕES.
-        val conf = waitText(3000) { it.has("CONFIRMAR") }
+        val conf = waitText(3000, rConfirm) { it.has("CONFIRMAR") }
             ?: return fail("Troca: não achei CONFIRMAR ALTERAÇÕES")
         tapWord(g, conf.first, conf.second.find("CONFIRMAR")!!)
 
-        // 6) Volta ao lobby (com botão EQUIPE e PARAR E RECEBER, sem o botão CONFIRMAR).
-        waitText(10000) { it.has("RECEBER", yMin = 0.7f) && it.has("EQUIPE", yMin = 0.7f) && !it.has("CONFIRMAR") }
+        // 6) Volta ao lobby (botão EQUIPE e PARAR E RECEBER lá embaixo). Lê só a faixa de baixo para detectar mais rápido.
+        waitText(10000, rBottom) { it.has("RECEBER", yMin = 0.7f) && it.has("EQUIPE", yMin = 0.7f) }
             ?: return fail("Troca: não voltei ao lobby depois de confirmar")
-        delay(800)
+        delay(300)
 
         // 7) Equipa Batman, Cavaleiro Arkham e Caçador de Marte (mesma lógica de arrasto, agora pelo nome do equipamento).
         return equipTeam(g, equip2, targets)
@@ -746,12 +857,13 @@ class TeamSwap(
     private suspend fun exitToLobby(g: BotAccessibilityService) {
         repeat(3) {
             // O lobby também tem um botão CANCELAR no canto (visto no seu print): se já estamos no lobby, NÃO toca nele.
-            val atual = cap.latest()?.let { text.read(it) }
-            if (atual != null && atual.has("RECEBER", yMin = 0.7f) && atual.has("EQUIPE", yMin = 0.7f) && !atual.has("CONFIRMAR")) return
-            val bk = waitText(2500) { it.has("CANCELAR", yMin = 0.85f) || it.has("VOLTAR", yMin = 0.85f) } ?: return
+            // Lê só a faixa de baixo (os botões ficam lá): bem mais rápido que a tela inteira.
+            val atual = cap.latest()?.let { text.read(it, rBottom[0], rBottom[1], rBottom[2], rBottom[3]) }
+            if (atual != null && atual.has("RECEBER", yMin = 0.7f) && atual.has("EQUIPE", yMin = 0.7f)) return
+            val bk = waitText(2500, rBack) { it.has("CANCELAR", yMin = 0.85f) || it.has("VOLTAR", yMin = 0.85f) } ?: return
             val wd = bk.second.find("CANCELAR", yMin = 0.85f) ?: bk.second.find("VOLTAR", yMin = 0.85f)!!
             tapWord(g, bk.first, wd)
-            if (waitText(3000) { it.has("RECEBER", yMin = 0.7f) && it.has("EQUIPE", yMin = 0.7f) } != null) return
+            if (waitText(3000, rBottom) { it.has("RECEBER", yMin = 0.7f) && it.has("EQUIPE", yMin = 0.7f) } != null) return
         }
     }
 
@@ -765,12 +877,12 @@ class TeamSwap(
         for (idx in 0 until 3) {
             say("Equipando o personagem ${idx + 1}...")
             openEquip(g, idx, chars[idx]) ?: return fail("Equipar: não abri a tela de equipamentos do personagem ${idx + 1}. Vi: $openInfo")
-            delay(500)
+            delay(250)
             pickAll(g, loadout[idx], emptyStart = false, lay = equipLayout)?.let { return it }
-            delay(500)
+            delay(60)
             cap.latest()?.let { debug(it, "equip_p${idx + 1}_final") }   // para você conferir como ficou
             exitToLobby(g)
-            delay(1200)   // deixa o lobby assentar antes de entrar no próximo personagem
+            delay(800)   // deixa o lobby assentar antes de entrar no próximo personagem
         }
         return null
     }

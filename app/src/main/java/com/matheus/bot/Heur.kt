@@ -298,6 +298,73 @@ object Heur {
         return out
     }
 
+    /**
+     * Versão RÁPIDA e mais PRECISA de Snap.ball() para o minigame TOQUE RÁPIDO. Recorta a região antes de converter e usa a mesma escala do
+     * Snap (800 de largura no quadro cheio), então os limites do Hough são os mesmos. Depois de achar o círculo, AFINA o centro: a bolinha
+     * branca no meio do anel é a mira; o centro dela (medido no quadro em resolução cheia) substitui o do Hough se ficar perto dele.
+     * Se o círculo cair na zona do minigame da BARRA, confere com Snap.barCircle() para não confundir os dois.
+     * Devolve o centro em proporção da tela.
+     */
+    fun ballFast(bmp: Bitmap): PointF? {
+        val fx0 = 0.40f; val fy0 = 0.15f; val fx1 = 0.95f; val fy1 = 0.90f
+        val x0 = (fx0 * bmp.width).toInt().coerceIn(0, bmp.width - 2)
+        val y0 = (fy0 * bmp.height).toInt().coerceIn(0, bmp.height - 2)
+        val x1 = (fx1 * bmp.width).toInt().coerceIn(x0 + 1, bmp.width)
+        val y1 = (fy1 * bmp.height).toInt().coerceIn(y0 + 1, bmp.height)
+        val crop = Bitmap.createBitmap(bmp, x0, y0, x1 - x0, y1 - y0)
+        val rgba = Mat(); Utils.bitmapToMat(crop, rgba); crop.recycle()
+        val gray = Mat(); Imgproc.cvtColor(rgba, gray, Imgproc.COLOR_RGBA2GRAY); rgba.release()
+        val sw = (0.55f * 800f).toInt()
+        val scale = gray.cols() / sw.toFloat()   // pixels reais por pixel reduzido
+        val sh = (gray.rows() / scale).toInt().coerceAtLeast(1)
+        val small = Mat(); Imgproc.resize(gray, small, Size(sw.toDouble(), sh.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+        val blur = Mat(); Imgproc.GaussianBlur(small, blur, Size(9.0, 9.0), 2.0)
+        val c = Mat()
+        Imgproc.HoughCircles(blur, c, Imgproc.HOUGH_GRADIENT, 1.2, 80.0, 120.0, 40.0, 30, 70)
+        var out: PointF? = null
+        var barChecked = false
+        var bar: PointF? = null
+        for (i in 0 until c.cols()) {
+            val v = c.get(0, i)
+            val fxp = fx0 + (v[0].toFloat() / sw) * (fx1 - fx0)
+            val fyp = fy0 + (v[1].toFloat() / sh) * (fy1 - fy0)
+            if (fxp in 0.46f..0.69f && fyp in 0.50f..0.78f) {
+                if (!barChecked) { val s = snap(bmp); bar = try { s.barCircle() } finally { s.release() }; barChecked = true }
+                val b = bar
+                if (b != null && abs(b.x - fxp) < 0.05f && abs(b.y - fyp) < 0.05f) continue
+            }
+            // Afina o centro pela bolinha branca do meio do anel (resolução cheia). Só vale se ficar perto do centro do Hough.
+            val cxF = v[0] * scale
+            val cyF = v[1] * scale
+            val rF = v[2] * scale
+            var rx = cxF
+            var ry = cyF
+            val half = (rF * 0.45).toInt().coerceAtLeast(6)
+            val rx0 = (cxF - half).toInt().coerceIn(0, gray.cols() - 2)
+            val ry0 = (cyF - half).toInt().coerceIn(0, gray.rows() - 2)
+            val rw = (2 * half).coerceAtMost(gray.cols() - rx0)
+            val rh = (2 * half).coerceAtMost(gray.rows() - ry0)
+            if (rw > 4 && rh > 4) {
+                val roi = Mat(gray, Rect(rx0, ry0, rw, rh))
+                val bin = Mat(); Imgproc.threshold(roi, bin, 235.0, 255.0, Imgproc.THRESH_BINARY)
+                val area = Core.countNonZero(bin)
+                if (area in 6..(rw * rh * 6 / 10)) {
+                    val mo = Imgproc.moments(bin, true)
+                    if (mo.m00 > 0) {
+                        val mx = rx0 + mo.m10 / mo.m00
+                        val my = ry0 + mo.m01 / mo.m00
+                        if (abs(mx - cxF) < rF * 0.35 && abs(my - cyF) < rF * 0.35) { rx = mx; ry = my }
+                    }
+                }
+                roi.release(); bin.release()
+            }
+            out = PointF((x0 + rx.toFloat()) / bmp.width, (y0 + ry.toFloat()) / bmp.height)
+            break
+        }
+        gray.release(); small.release(); blur.release(); c.release()
+        return out
+    }
+
     /** PING PONG: faixa da tela com a barra (ampulheta) e a altura do quadrado branco do centro, em proporção da tela (medidas no print). */
     const val PING_X0 = 0.54f
     const val PING_X1 = 0.625f
