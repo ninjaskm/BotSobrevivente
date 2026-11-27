@@ -13,7 +13,7 @@ Base: código real em `app/src/main/java/com/matheus/bot/`. Onde o `README.md` d
 | 3 — Ping pong e latência do toque | **Código pronto.** Falta validar no celular. |
 | 4 — Personagem pela arte (passo A, OpenCV) | **Código pronto.** Falta validar no celular e calibrar os limites com `debug/arte_scores.txt`. |
 | 5 a 6 | Não iniciadas. |
-| 7 — Higiene e robustez | **Parcialmente concluída.** Logs de sessão e atualização do README já existem; `Snap.arrow()` segue sem uso e o ciclo de `team`/`fights` ainda não foi redefinido para uma nova execução dentro do mesmo serviço. |
+| 7 — Higiene e robustez | **Parcialmente concluída.** Logs de sessão e atualização do README já existem; falta definir o ciclo de `team`/`fights` para uma nova execução dentro do mesmo serviço. |
 
 **Nada foi compilado nem testado no celular.** O primeiro passo é abrir no Android Studio, dar o Sync e corrigir qualquer erro de compilação.
 
@@ -56,7 +56,7 @@ Sem esses três arquivos qualquer "otimização" nova é chute.
 | D5 | Limiares de cor calibrados com poucos prints. | Aberto. O modo de coleta (fase 0) junta os quadros para reajustar depois. |
 | D6 | Atraso real do toque desconhecido; `pingLeadMs` chutado. | **Feito (fase 3):** medição e autocalibração opcional. |
 | D7 | O nome da carta é a única identidade do personagem. | Aberto (fase 4). |
-| D9 | Higiene (`tossDelayMs` morto, `pingLeadMs` sem campo, `debug/` sem limite). | **Feito** nos itens de configuração e limpeza; `team`/`fights` e `Snap.arrow()` seguem na fase 7. |
+| D9 | Higiene (`tossDelayMs` morto, `pingLeadMs` sem campo, `debug/` sem limite). | **Feito** nos itens de configuração e limpeza; o reset de `team`/`fights` segue na fase 7. |
 
 ---
 
@@ -208,7 +208,7 @@ Aceite: `ocr` no `perf.txt` cai em chamadas por segundo durante o combate, sem q
 ### Fase 7 — Higiene e robustez (pode ser feita junto com qualquer fase) — PARCIAL
 
 - [ ] Definir o que caracteriza um **novo ciclo**. Hoje `Brain.start()` zera `fights` apenas ao criar o laço pela primeira vez; pausar/continuar preserva a contagem e o time. `team` começa em 1 na criação do `Brain` e não é reiniciado durante a vida do serviço.
-- [x] Manter `Snap.arrow()` identificado como legado: a seta usa `Heur.arrowFast`; o método não tem chamadas no código atual.
+- [x] Remover `Snap.arrow()` duplicado; a seta usa `Heur.arrowFast`. `Heur.ballFast()` segue sem uso e pode ser removido em outra limpeza.
 - [x] Atualizar o `README.md` com ping pong rastreado, `Perf`, vigia, lotes, configurações e `dragHoldMs = 900`.
 - [x] Log de sessão em `debug/sessao_*.txt` com contadores de lutas, poderes, minigames, watchdog e tempo de combate. **Limite atual:** não há contadores específicos de trocas de time nem de erros; adicionar apenas se essas métricas forem necessárias.
 

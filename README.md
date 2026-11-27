@@ -142,7 +142,7 @@ MainActivity ──(MediaProjection)──► BotService
 
 ### BotService
 - Em `onStartCommand`: se a ação for `TOGGLE_PAUSE` (botão da notificação), pausa/continua o bot (ou encerra o serviço se o bot ainda não foi montado). Só inicia a captura se ainda não houver projeção.
-- Cria o canal "Bot" (importância baixa) e a notificação "Bot Sobrevivente pausado/rodando", entra em **primeiro plano antes** de obter o `MediaProjection` (exigência do Android 14+), registra callback (`onStop` → `shutdown()`), inicia o OpenCV (`OpenCVLoader.initLocal()`) e carrega as referências de arte (`CardArt.init`; se falhar, o bot segue só com o OCR).
+- Cria o canal "Bot" (importância baixa) e a notificação "Bot Sobrevivente pausado/rodando", entra em **primeiro plano antes** de obter o `MediaProjection` (exigência do Android 14+), registra callback (`onStop` → `shutdown()`), inicia o OpenCV (`OpenCVLoader.initLocal()`; se falhar, encerra o serviço) e carrega as referências de arte (`CardArt.init`; se falhar, o bot segue só com o OCR).
 - Captura sempre em **paisagem**: `w = max(largura, altura)`, `h = min(...)` (ex.: 2400x1080). Com `captureScalePct < 100`, a captura é reduzida (dimensões pares) e `BotAccessibilityService.gestureScale` guarda a relação tela real / captura para converter todos os gestos.
 - Cria o `Brain` com a pasta de debug `getExternalFilesDir(null)/debug`. O painel é **escondido (INVISIBLE)** durante a montagem de times, porque aparece na captura e cobriria o quadrado 1.
 - `START_NOT_STICKY`. `shutdown()` para o Brain (grava a sessão), remove o painel, volta `gestureScale` a 1, libera a captura e a projeção e encerra o serviço.
@@ -383,7 +383,7 @@ Slots (x): poder 3 = 8–18%, poder 2 = 18,5–28,7%, poder 1 = 29,3–39,5%.
 `Heur.power()` é a versão rápida da leitura dos 3 slots (recorta só a faixa de baixo, y 86–96%) e devolve 6 valores: carregado e X vermelho de cada slot ([slot 3, slot 2, slot 1]).
 `Heur.arrowFast()` e `Heur.pingProfile()` recortam **antes** de converter (bem mais leves que o quadro todo).
 
-Código existente mas **sem uso** hoje: `Snap.arrow()` (substituída por `Heur.arrowFast`) e `Heur.ballFast()` (a bolinha usa `Snap.ball()`).
+Código existente mas **sem uso** hoje: `Heur.ballFast()` (a bolinha usa `Snap.ball()`).
 
 ---
 
@@ -442,5 +442,5 @@ O painel mostra o estado atual (`COMBATE | lutas: N`, tempo desde o último espe
 - Reduzir `captureScalePct` abaixo de 100 faz o OCR enxergar letra menor; confira a montagem de times antes de usar.
 - Só há três rodadas de rolagem por busca; listas muito longas podem exigir mais.
 - A coleta de quadros (`record`) pode custar CPU durante o ping pong.
-- Código sem uso: `Snap.arrow()` e `Heur.ballFast()` (ver seção 9).
+- Código sem uso: `Heur.ballFast()` (ver seção 9).
 - O uso de automação pode contrariar as regras do jogo; é decisão do dono do projeto.
