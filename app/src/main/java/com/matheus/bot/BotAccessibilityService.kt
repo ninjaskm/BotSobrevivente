@@ -78,6 +78,23 @@ class BotAccessibilityService : AccessibilityService() {
     }
 
     /**
+     * Arrastar passando por um ponto intermediário: segura em (x1,y1), vai até (xm,ym) (ex.: para CIMA, saindo da faixa da lista, para o
+     * jogo não ler como rolagem horizontal) e depois até (x2,y2), onde fica parado `endHoldMs` antes de soltar.
+     */
+    suspend fun dragVia(
+        x1: Float, y1: Float, xm: Float, ym: Float, x2: Float, y2: Float,
+        holdMs: Long, move1Ms: Long, move2Ms: Long, endHoldMs: Long = 400L,
+    ): Boolean {
+        val hold = GestureDescription.StrokeDescription(Path().apply { moveTo(x1, y1) }, 0, holdMs.coerceAtLeast(1), true)
+        if (!run(hold)) return false
+        val m1 = hold.continueStroke(Path().apply { moveTo(x1, y1); lineTo(xm, ym) }, 0, move1Ms.coerceAtLeast(1), true)
+        if (!run(m1)) return false
+        val m2 = m1.continueStroke(Path().apply { moveTo(xm, ym); lineTo(x2, y2) }, 0, move2Ms.coerceAtLeast(1), true)
+        if (!run(m2)) return false
+        return run(m2.continueStroke(Path().apply { moveTo(x2, y2) }, 0, endHoldMs.coerceAtLeast(1), false))
+    }
+
+    /**
      * Rolagem SEM "lançar": arrasta `moveMs` e fica parado no fim `holdMs` antes de soltar. Como o dedo solta
      * parado, a lista não ganha inércia e anda exatamente a distância pedida (não pula cartas).
      */

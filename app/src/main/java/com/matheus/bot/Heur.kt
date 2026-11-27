@@ -11,6 +11,7 @@ import org.opencv.core.Rect
 import org.opencv.core.Scalar
 import org.opencv.core.Size
 import org.opencv.imgproc.Imgproc
+import kotlin.math.abs
 
 /** Quadro reduzido (largura 800) com análises que não precisam de template. */
 class Snap(val w: Int, val h: Int, private val hsv: Mat, private val gray: Mat) {
@@ -88,9 +89,22 @@ class Snap(val w: Int, val h: Int, private val hsv: Mat, private val gray: Mat) 
         val c = Mat()
         Imgproc.HoughCircles(blur, c, Imgproc.HOUGH_GRADIENT, 1.2, 80.0, 120.0, 40.0, 30, 70)
         var res: PointF? = null
-        if (c.cols() > 0) {
-            val v = c.get(0, 0)
-            res = PointF(((rect.x + v[0]) / w).toFloat(), ((rect.y + v[1]) / h).toFloat())
+        var bar: PointF? = null
+        var barChecked = false
+        for (i in 0 until c.cols()) {
+            val v = c.get(0, i)
+            val px = rect.x + v[0]
+            val py = rect.y + v[1]
+            // O círculo do minigame da BARRA tem tamanho parecido e fica nesta zona. Se for ele (tem a barra vertical em cima),
+            // não é a bolinha: pula e olha o próximo círculo.
+            val inBarZone = px >= 0.46f * w && px <= 0.69f * w && py >= 0.50f * h && py <= 0.78f * h
+            if (inBarZone) {
+                if (!barChecked) { bar = barCircle(); barChecked = true }
+                val b = bar
+                if (b != null && abs(b.x * w - px) < 0.05f * w && abs(b.y * h - py) < 0.05f * h) continue
+            }
+            res = PointF((px / w).toFloat(), (py / h).toFloat())
+            break
         }
         sub.release(); blur.release(); c.release()
         return res
@@ -233,6 +247,57 @@ object Heur {
         rgba.release(); rgb.release(); hsv.release(); crop.recycle()
         return out
     }
+    /**
+     * Versão RÁPIDA de Snap.arrow() para o minigame PASSE O DEDO: recorta a região da seta ANTES de converter (o quadro todo
+     * 2400x1080 nem chega a virar HSV nem cinza) e já reduz para a mesma escala do Snap (800 de largura no quadro cheio), então
+     * os limites de área e formato são os mesmos. Devolve a seta com direção, centro e comprimento em proporção da tela.
+     */
+    fun arrowFast(bmp: Bitmap, minArea: Double = 600.0, minAspect: Float = 1.5f): Snap.Arrow? {
+        val fx0 = 0.35f; val fy0 = 0.15f; val fx1 = 0.85f; val fy1 = 0.92f
+        val x0 = (fx0 * bmp.width).toInt().coerceIn(0, bmp.width - 2)
+        val y0 = (fy0 * bmp.height).toInt().coerceIn(0, bmp.height - 2)
+        val x1 = (fx1 * bmp.width).toInt().coerceIn(x0 + 1, bmp.width)
+        val y1 = (fy1 * bmp.height).toInt().coerceIn(y0 + 1, bmp.height)
+        val crop = Bitmap.createBitmap(bmp, x0, y0, x1 - x0, y1 - y0)
+        val rgba = Mat(); Utils.bitmapToMat(crop, rgba); crop.recycle()
+        val rgb = Mat(); Imgproc.cvtColor(rgba, rgb, Imgproc.COLOR_RGBA2RGB)
+        val sw = 400   // = 0,5 de 800: mesma escala do Snap
+        val sh = (rgb.rows() * sw / rgb.cols().toDouble()).toInt().coerceAtLeast(1)
+        val small = Mat(); Imgproc.resize(rgb, small, Size(sw.toDouble(), sh.toDouble()), 0.0, 0.0, Imgproc.INTER_AREA)
+        val hsv = Mat(); Imgproc.cvtColor(small, hsv, Imgproc.COLOR_RGB2HSV)
+        val m = Mat()
+        Core.inRange(hsv, Scalar(100.0, 30.0, 150.0), Scalar(135.0, 160.0, 255.0), m)
+        Imgproc.morphologyEx(m, m, Imgproc.MORPH_CLOSE, Imgproc.getStructuringElement(Imgproc.MORPH_RECT, Size(5.0, 5.0)))
+        val cs = ArrayList<MatOfPoint>()
+        Imgproc.findContours(m.clone(), cs, Mat(), Imgproc.RETR_EXTERNAL, Imgproc.CHAIN_APPROX_SIMPLE)
+        val best = cs.maxByOrNull { Imgproc.contourArea(it) }
+        var out: Snap.Arrow? = null
+        if (best != null && Imgproc.contourArea(best) > minArea) {
+            val bb = Imgproc.boundingRect(best)
+            val ar = maxOf(bb.width, bb.height).toFloat() / minOf(bb.width, bb.height).coerceAtLeast(1)
+            if (ar >= minAspect) {
+                val mm = Mat(m, bb)
+                // Proporção da TELA: a região cobre x de 0,35 a 0,85 e y de 0,15 a 0,92.
+                val cx = fx0 + ((bb.x + bb.width / 2f) / sw) * (fx1 - fx0)
+                val cy = fy0 + ((bb.y + bb.height / 2f) / sh) * (fy1 - fy0)
+                if (bb.height >= bb.width) {
+                    val n = maxOf(1, bb.height / 4)
+                    val top = Core.countNonZero(mm.rowRange(0, n))
+                    val bot = Core.countNonZero(mm.rowRange(bb.height - n, bb.height))
+                    out = Snap.Arrow(0, if (bot > top) 1 else -1, cx, cy, (bb.height.toFloat() / sh) * (fy1 - fy0))
+                } else {
+                    val n = maxOf(1, bb.width / 4)
+                    val left = Core.countNonZero(mm.colRange(0, n))
+                    val right = Core.countNonZero(mm.colRange(bb.width - n, bb.width))
+                    out = Snap.Arrow(if (right > left) 1 else -1, 0, cx, cy, (bb.width.toFloat() / sw) * (fx1 - fx0))
+                }
+                mm.release()
+            }
+        }
+        rgba.release(); rgb.release(); small.release(); hsv.release(); m.release()
+        return out
+    }
+
     fun snap(bmp: Bitmap): Snap {
         val rgba = Mat()
         Utils.bitmapToMat(bmp, rgba)

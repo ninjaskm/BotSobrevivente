@@ -26,7 +26,7 @@ class BotConfig(ctx: Context) {
         get() = p.getInt("power1AfterSec", 0)
         set(v) = p.edit().putInt("power1AfterSec", v).apply()
 
-    /** Atraso (ms) antes do toque no mini-evento "TOQUE PARA ARREMESSAR". */
+    /** Atraso (ms) antes do toque no mini-evento PING PONG (texto do jogo: "TOQUE PARA ARREMESSAR"). */
     var tossDelayMs: Int
         get() = p.getInt("tossDelayMs", 600)
         set(v) = p.edit().putInt("tossDelayMs", v).apply()
@@ -45,4 +45,9 @@ class BotConfig(ctx: Context) {
     var powerPct: Int
         get() = p.getInt("powerPct", 55)
         set(v) = p.edit().putInt("powerPct", v).apply()
+
+    /** Minigame de encher a barra. Desligue se ele estiver atrapalhando o combo (disparo falso). */
+    var barGame: Boolean
+        get() = p.getBoolean("barGame", true)
+        set(v) = p.edit().putBoolean("barGame", v).apply()
 }

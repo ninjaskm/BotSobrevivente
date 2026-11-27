@@ -64,7 +64,7 @@ class MainActivity : ComponentActivity() {
         val eFights = num(cfg.fightTarget)
         label("Segundos até o poder 1 (0 = nunca)")
         val eP1 = num(cfg.power1AfterSec)
-        label("Atraso do arremesso (ms)")
+        label("Atraso do ping pong (ms)")
         val eToss = num(cfg.tossDelayMs)
         label("Arrastos por rodada (padrão 8)")
         val eSwipes = num(cfg.comboSwipes)
@@ -74,7 +74,8 @@ class MainActivity : ComponentActivity() {
         val ePow = num(cfg.powerPct)
         val cBlock = CheckBox(this).apply { text = "Bloqueio (2 dedos)"; isChecked = cfg.block }
         val cUlt = CheckBox(this).apply { text = "Usar poder 3 (ult)"; isChecked = cfg.ult }
-        col.addView(cBlock); col.addView(cUlt)
+        val cBar = CheckBox(this).apply { text = "Minigame da barra (desligue se atrapalhar o combo)"; isChecked = cfg.barGame }
+        col.addView(cBlock); col.addView(cUlt); col.addView(cBar)
         btn("Salvar configurações") {
             cfg.fightTarget = eFights.text.toString().toIntOrNull() ?: 0
             cfg.power1AfterSec = eP1.text.toString().toIntOrNull() ?: 0
@@ -84,6 +85,7 @@ class MainActivity : ComponentActivity() {
             cfg.powerPct = ePow.text.toString().toIntOrNull() ?: 55
             cfg.block = cBlock.isChecked
             cfg.ult = cUlt.isChecked
+            cfg.barGame = cBar.isChecked
             Toast.makeText(this, "Salvo", Toast.LENGTH_SHORT).show()
         }
         setContentView(ScrollView(this).apply { addView(col) })
@@ -167,7 +169,77 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        autoEnableAccessibility()
+        refreshInfo()
+        info.postDelayed({
+            // O serviço ainda não conectou após ~1,5 s: tenta de novo, agora forçando o religamento (tira e põe de volta na lista).
+            if (BotAccessibilityService.instance == null) autoEnableAccessibility(force = true)
+            refreshInfo()
+        }, 1500)
+        info.postDelayed({ refreshInfo() }, 3000)
+    }
+
+    /**
+     * Liga a acessibilidade sozinho ao abrir o app (depois de cada Run), se o app tiver a permissão WRITE_SECURE_SETTINGS.
+     * Essa permissão só se concede pelo adb, UMA vez: conceder_permissao_uma_vez.bat. Sem ela, não faz nada.
+     */
+    /** Resultado da última tentativa de ligar a acessibilidade sozinho (aparece na tela quando ela não liga). */
+    private var autoMsg = ""
+
+    private fun hasSecureSettingsPermission() =
+        checkSelfPermission("android.permission.WRITE_SECURE_SETTINGS") == PackageManager.PERMISSION_GRANTED
+
+    private fun autoEnableAccessibility(force: Boolean = false) {
+        if (BotAccessibilityService.instance != null) { autoMsg = ""; return }
+        if (!hasSecureSettingsPermission()) {
+            autoMsg = "Sem a permissão WRITE_SECURE_SETTINGS: rode conceder_permissao_uma_vez.bat (celular por USB) e abra o app de novo."
+            return
+        }
+        try {
+            val comp = ComponentName(this, BotAccessibilityService::class.java)
+            val full = comp.flattenToString()
+            val short = comp.flattenToShortString()
+            val isOurs = { s: String -> s.equals(full, ignoreCase = true) || s.equals(short, ignoreCase = true) }
+            val cur = Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: ""
+            val list = cur.split(':').filter { it.isNotEmpty() }
+            val listed = list.any(isOurs)
+            if (!listed) {
+                Settings.Secure.putString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, (list + full).joinToString(":"))
+                autoMsg = "Ligando a acessibilidade sozinho..."
+            } else if (force) {
+                // Já está na lista mas o serviço não conectou (ex.: depois de um Run): tira e põe de volta para o sistema religar.
+                Settings.Secure.putString(
+                    contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, list.filterNot(isOurs).joinToString(":"),
+                )
+                info.postDelayed({
+                    runCatching {
+                        val now = (Settings.Secure.getString(contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: "")
+                            .split(':').filter { it.isNotEmpty() }
+                        if (!now.any(isOurs)) {
+                            Settings.Secure.putString(
+                                contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES, (now + full).joinToString(":"),
+                            )
+                        }
+                        Settings.Secure.putInt(contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+                    }
+                    refreshInfo()
+                }, 400)
+                autoMsg = "Serviço na lista mas desconectado: religando..."
+            } else {
+                autoMsg = "Serviço já está na lista; esperando o sistema conectá-lo..."
+            }
+            Settings.Secure.putInt(contentResolver, Settings.Secure.ACCESSIBILITY_ENABLED, 1)
+        } catch (e: Exception) {
+            autoMsg = "Erro ao ligar a acessibilidade: ${e.javaClass.simpleName}: ${e.message}"
+            Log.w("MainActivity", "autoEnableAccessibility falhou", e)
+        }
+    }
+
+    private fun refreshInfo() {
+        val acc = BotAccessibilityService.instance != null
         info.text = "Sobreposição: " + (if (Settings.canDrawOverlays(this)) "OK" else "FALTA") +
-            "\nAcessibilidade: " + (if (BotAccessibilityService.instance != null) "OK" else "FALTA")
+            "\nAcessibilidade: " + (if (acc) "OK" else "FALTA") +
+            "\nPermissão p/ ligar sozinho: " + (if (hasSecureSettingsPermission()) "OK" else "FALTA") +
+            (if (!acc && autoMsg.isNotEmpty()) "\n$autoMsg" else "")
     }
 }

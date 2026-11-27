@@ -11,7 +11,10 @@ import kotlinx.coroutines.launch
 import java.io.File
 import kotlin.random.Random
 
-private enum class Sc { COMBATE, AVANCAR, CONTINUAR, FECHAR, CONFIRMA, LOBBY_MORTO, LOBBY_VIVO, ROLETA, HOME, EQUIPE_VAZIA, DESCONHECIDA }
+/** Os minigames dos especiais. A decisão de qual é fica toda em Brain.miniOf (um único lugar). */
+private enum class Mini { PING_PONG, SETA, TOQUE, BARRA }
+
+private enum class Sc { COMBATE, AVANCAR, CONTINUAR, FECHAR, CONFIRMA, LOBBY_MORTO, LOBBY_VIVO, ROLETA, HOME, EQUIPE_VAZIA, DETALHE, DESCONHECIDA }
 
 /**
  * "Cérebro": a cada ciclo LÊ a tela (texto dos botões + formas/cores), descobre em que
@@ -47,9 +50,12 @@ class Brain(
     private var tossDebug = 0
     private var arrowDebug = 0
     private var evDebug = 0
-    private var lastBlindSpin = 0L
     private var lastProbe = 0L
+    /** O minigame que acabou de rodar parou porque já apareceu OUTRO: o próximo não deve esperar o bloqueio de 0,8 s. */
+    private var chainEv = false
     private var noCombat = 0
+    /** Toques seguidos para fechar a tela de detalhes do personagem (abriu sem querer). */
+    private var detailTaps = 0
     private var team = 1
     private val swap = TeamSwap(cap, text) { b, tag -> saveDebug(b, tag) }.also { it.say = say }
     private var lastHud = 0.0
@@ -62,7 +68,25 @@ class Brain(
     /** Janela em que um minigame pode aparecer: logo depois de o bot usar um poder (1, 2 ou 3). */
     @Volatile private var evWindowUntil = 0L
     private fun markPower() { evWindowUntil = now() + 8000 }
+
+    // Trava contra "bater no poder para sempre": se o bot toca no MESMO poder mais de 3 vezes em 1,5 s e ele continua parecendo
+    // carregado (poder que não dispara: leitura errada do brilho, efeito vermelho sobre o slot, personagem atordoado...), esse poder
+    // fica de lado por 2,5 s e o combo volta. Antes, com o poder "carregado" o tempo todo, o bot só tocava nele e nunca arrastava.
+    private val powerWinStart = LongArray(4)
+    private val powerCnt = IntArray(4)
+    private val powerBlockUntil = LongArray(4)
+    private fun usePower(slot: Int): Boolean {
+        val n = now()
+        if (n < powerBlockUntil[slot]) return false
+        if (n - powerWinStart[slot] > 1500) { powerWinStart[slot] = n; powerCnt[slot] = 0 }
+        powerCnt[slot]++
+        if (powerCnt[slot] > 3) { powerBlockUntil[slot] = n + 2500; powerCnt[slot] = 0; return false }
+        return true
+    }
     private var barDebug = 0
+    /** Última detecção da forma da barra (ainda não confirmada) e quando foi. Só vira minigame se aparecer 2x seguidas no mesmo lugar. */
+    private var barSeen: PointF? = null
+    private var barSeenAt = 0L
 
     fun start() {
         paused = false
@@ -128,6 +152,7 @@ class Brain(
     }
 
     private suspend fun tapW(g: BotAccessibilityService, w: Word, bmp: Bitmap) = g.tap(w.cx * bmp.width, w.cy * bmp.height)
+    private suspend fun tapPoint(g: BotAccessibilityService, bmp: Bitmap, fx: Float, fy: Float) = g.tap(fx * bmp.width, fy * bmp.height)
 
     // ---------------- Menus (leitura de texto) ----------------
     private suspend fun menuTick(bmp: Bitmap, g: BotAccessibilityService, probe: Boolean = false) {
@@ -150,6 +175,22 @@ class Brain(
             fechar != null -> { enter(Sc.FECHAR); tapW(g, fechar, bmp); delay(800) }
             avancar != null -> { enter(Sc.AVANCAR); tapW(g, avancar, bmp); delay(800) }
             continuar != null -> { enter(Sc.CONTINUAR); tapW(g, continuar, bmp); delay(800) }
+            // Tela de detalhes do personagem (abriu sem querer): tem EQUIPAMENTO + MELHORIAS DE SUPORTE / NÍVEL ATUAL / CRÍTICO.
+            // Fecha tocando no MEIO do personagem (o quadrado com o modelo 3d, à esquerda), abaixo do painel flutuante do bot.
+            // A montagem de times trata essa tela sozinha (TeamSwap.openEquip), por isso isto só roda fora dela.
+            s.has("EQUIPAMENTO") && s.hasAny("SUPORTE", "MELHORIAS", "NIVEL ATUAL", "CRITICO") -> {
+                if (last != Sc.DETALHE) detailTaps = 0
+                enter(Sc.DETALHE)
+                detailTaps++
+                if (detailTaps > 10) {
+                    saveDebug(bmp, "detalhe_nao_fechou")
+                    say("Tela de detalhes do personagem não fechou. Pausado.")
+                    paused = true
+                } else {
+                    tapPoint(g, bmp, 0.16f, 0.40f)
+                    delay(900)
+                }
+            }
             receber != null && equipe != null -> lobby(bmp, g, lutar, receber)
             s.has("GIRE") || s.has("SORTEAR") || s.has("RODA", yMax = 0.35f) || s.has("RECOMPENSAS", yMax = 0.35f) -> {
                 spinWheel(bmp, g)
@@ -164,9 +205,8 @@ class Brain(
                 say("Montando o time 1...")
                 showUi(false)
                 val err = try { delay(700); swap.createTeam1(g) } finally { showUi(true) }
-                if (err == null) say("Time 1 escolhido. Equipe os 3 na mão (equipamentos = próxima etapa) e aperte ▶ Play. Pausado.")
-                else say("$err. Pausado.")
-                paused = true
+                if (err == null) say("Time 1 pronto (personagens e equipamentos). Seguindo.")
+                else { say("$err. Pausado."); paused = true }
             }
             else -> {
                 if (probe) return   // só uma espiada durante a luta: tela não reconhecida = continua em combate
@@ -177,7 +217,10 @@ class Brain(
                     // O texto da roleta fica cortado no topo da tela e o OCR geral costuma não ler.
                     // Segunda leitura só da faixa de cima (só em tela desconhecida, para não pesar).
                     val top = text.read(bmp, 0.15f, 0f, 0.85f, 0.32f)
-                    if (top.hasAny("GIRE", "RODA", "SORTEAR", "RECOMPENSAS")) {
+                    // "PARTIDA" (fim da frase "...RECOMPENSAS DA PARTIDA!") costuma ser a única parte legível do texto cortado da roleta;
+                    // vale só aqui (tela que nenhum outro botão reconheceu) e só no topo da tela.
+                    if (top.hasAny("GIRE", "RODA", "SORTEAR", "RECOMPENSAS") ||
+                        top.has("PARTIDA", yMax = 0.25f) || s.has("PARTIDA", yMax = 0.25f)) {
                         spinWheel(bmp, g)
                     } else {
                         enter(Sc.DESCONHECIDA)
@@ -186,13 +229,8 @@ class Brain(
                             saveDebug(bmp, "desconhecida")
                             say("Tela desconhecida")
                         }
-                        // Tentativa às cegas: se ficou parado numa tela sem texto reconhecido, pode ser a roleta.
-                        if (unknown >= 4 && now() - lastBlindSpin > 4000) {
-                            say("Tela desconhecida: tentando girar a roleta")
-                            lastBlindSpin = now()
-                            saveDebug(bmp, "cega")
-                            spinSwipe(bmp, g)
-                        }
+                        // Tela desconhecida: NÃO gira a roleta às cegas. Só continua lendo (OCR geral + faixa de cima) a cada volta e age
+                        // normalmente assim que reconhecer a tela. Se ficar tempo demais sem reconhecer, pausa (abaixo).
                         if (unknown > 120) { say("Tela desconhecida por muito tempo. Pausado."); paused = true }
                     }
                 }
@@ -208,7 +246,15 @@ class Brain(
 
     private suspend fun spinWheel(bmp: Bitmap, g: BotAccessibilityService) {
         enter(Sc.ROLETA)
-        val ok = spinSwipe(bmp, g)
+        val first = spinSwipe(bmp, g)
+        // Segurança: 2º giro logo depois (o 1º pode não pegar). Se o combate já apareceu, não gira de novo.
+        delay(700)
+        val inCombat = cap.latest()?.let { b ->
+            val sn = Heur.snap(b)
+            try { sn.isCombat() } finally { sn.release() }
+        } ?: false
+        val second = if (inCombat) false else spinSwipe(bmp, g)
+        val ok = first || second
         // Espera o giro acabar, mas sai assim que o combate aparecer (antes esperava 4,5 s fixos).
         val limit = now() + if (ok) 4500 else 1200
         while (currentCoroutineContext().isActive && now() < limit) {
@@ -280,31 +326,50 @@ class Brain(
         val ev = evScreen
         if (ev != null && now() - evAt < 1500 && now() >= evBlockUntil) {
             evScreen = null
-            val handled = when {
-                ev.has("PASSE") || ev.has("DEDO") -> { say("Minigame: seta"); swipeEvent(g); true }
-                ev.has("ARREMESS") -> { say("Minigame: arremesso"); toss(g, w, h); true }
-                ev.has("TOQUE") && ev.has("RAPIDO") -> { say("Minigame: bolinha"); ball(g, w, h); true }
-                // Minigame de encher a barra (texto ainda não visto): spam de toques na tela enquanto o texto durar.
-                // Os gatilhos genéricos (palavras soltas) só valem na janela depois de usar um poder; os textos específicos
-                // acima (PASSE O DEDO, ARREMESSAR, TOQUE RÁPIDO) valem sempre, porque também podem vir por um ícone na tela.
-                now() < evWindowUntil && ev.hasAny("ENCHER", "BARRA", "CARREG", "MARTEL", "TOQUE") -> {
-                    if (evDebug < 3) { saveDebug(bmp, "evento_barra"); evDebug++ }
-                    say("Minigame: barra"); mash(g, w, h, null); true
+            val kind = miniOf(ev)
+            if (kind != null) {
+                val acted: Boolean = when (kind) {
+                    Mini.PING_PONG -> { say("Minigame: ping pong"); pingPong(g, w, h); true }
+                    Mini.SETA -> { say("Minigame: seta"); swipeEvent(g) }
+                    Mini.TOQUE -> touchGame(g, w, h, preferBar = false)
+                    Mini.BARRA -> {
+                        if (evDebug < 3) { saveDebug(bmp, "evento_barra"); evDebug++ }
+                        touchGame(g, w, h, preferBar = true)
+                    }
                 }
-                else -> false
+                // Se o texto disparou mas o minigame NÃO existia (a forma não apareceu), bloqueia por 3 s: antes o bloqueio era de
+                // 0,4 s e o mesmo texto falso voltava a interromper o combo depois de 1 arrasto, sem parar (combo "do zero" toda hora).
+                // Com minigame de verdade: bloqueio curto só para o mesmo texto não disparar de novo logo que ele acaba.
+                evBlockUntil = when {
+                    !acted -> now() + 3000
+                    chainEv || kind == Mini.PING_PONG -> 0L
+                    else -> now() + 400
+                }
+                chainEv = false
+                return
             }
-            if (handled) { evBlockUntil = now() + 800; return }
         }
 
         // Gatilho pela FORMA (só a barra de encher), para quando o texto do evento já sumiu ou o OCR não leu: círculo pequeno
         // + barra vertical. A cada ~0,3 s. A seta do PASSE O DEDO NÃO dispara por forma: brilhos azuis do cenário e dos
         // personagens (ex.: Batman) eram lidos como seta e interrompiam o combo; ela só começa pelo TEXTO do evento.
-        if (now() >= evBlockUntil && now() < evWindowUntil && now() - lastShape > 300) {
+        // CONFIRMAÇÃO: um quadro só não basta (brilhos de efeito imitam círculo + faixa clara e disparavam o spam no meio da luta).
+        // Só vira minigame se a forma aparecer 2 leituras seguidas (<0,7 s entre elas) praticamente no mesmo ponto; o minigame de
+        // verdade fica vários segundos na tela, o falso some. Enquanto não confirma, o combo segue normal.
+        if (cfg.barGame && now() >= evBlockUntil && now() < evWindowUntil && now() - lastShape > 250) {
             lastShape = now()
             val bp = snap.barCircle()
-            if (bp != null) {
+            val prev = barSeen
+            if (bp == null) {
+                barSeen = null
+            } else if (prev != null && now() - barSeenAt < 700 &&
+                kotlin.math.abs(prev.x - bp.x) < 0.03f && kotlin.math.abs(prev.y - bp.y) < 0.03f
+            ) {
+                barSeen = null
                 if (barDebug < 3) { saveDebug(bmp, "barra_ok"); barDebug++ }
-                say("Minigame: barra"); mash(g, w, h, bp); evBlockUntil = now() + 500; return
+                say("Minigame: barra"); mash(g, w, h, bp); evBlockUntil = now() + 1500; return
+            } else {
+                barSeen = bp; barSeenAt = now()
             }
         }
 
@@ -321,12 +386,12 @@ class Brain(
         val c2 = !x2 && (p2 > pinkTh || v2 > th)
         val c1 = !x1 && (p1 > pinkTh || v1 > th)
         // Toca no centro do número (círculo rosa) de cada slot.
-        if (cfg.ult && c3) { markPower(); g.tap(w * 0.13f, h * 0.905f); lastEvCheck = 0; delay(120); return }
-        if (c2) { markPower(); g.tap(w * 0.236f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }
+        if (cfg.ult && c3 && usePower(3)) { markPower(); g.tap(w * 0.13f, h * 0.905f); lastEvCheck = 0; delay(120); return }
+        if (c2 && usePower(2)) { markPower(); g.tap(w * 0.236f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }
         // Poder 2 com X vermelho (indisponível): usa o poder 1 se estiver carregado, em vez de ficar tocando no 2.
-        if (x2 && c1) { markPower(); g.tap(w * 0.343f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }
+        if (x2 && c1 && usePower(1)) { markPower(); g.tap(w * 0.343f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }
         val sec = cfg.power1AfterSec
-        if (sec > 0 && now() - lastPower2 > sec * 1000L && c1) {
+        if (sec > 0 && now() - lastPower2 > sec * 1000L && c1 && usePower(1)) {
             markPower(); g.tap(w * 0.343f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return
         }
         combo(g, w, h)
@@ -336,13 +401,33 @@ class Brain(
     private fun eventReady(): Boolean {
         val ev = evScreen ?: return false
         if (now() - evAt >= 1500 || now() < evBlockUntil) return false
-        return ev.has("PASSE") || ev.has("DEDO") || ev.has("ARREMESS") || (ev.has("TOQUE") && ev.has("RAPIDO")) ||
-            (now() < evWindowUntil && ev.hasAny("ENCHER", "BARRA", "CARREG", "MARTEL", "TOQUE"))
+        return miniOf(ev) != null
     }
+
+    /**
+     * ÚNICO lugar que decide qual minigame é, pelo texto do canto (a ordem importa):
+     *  1) PING PONG (texto ARREMESSAR do jogo; seta que vai e volta) vem antes de tudo, para nunca virar o de arrastar;
+     *  2) PASSE O DEDO (seta de arrastar);
+     *  3) TOQUE RÁPIDO (bolinha ou barra: quem separa os dois é a FORMA, em touchGame);
+     *  4) palavras soltas de "encher a barra", só na janela logo depois de usar um poder (senão dão falso positivo).
+     * Os textos específicos valem sempre, porque também podem vir por um ícone na tela.
+     */
+    private fun miniOf(ev: Screen): Mini? = when {
+        ev.has("ARREMESS") -> Mini.PING_PONG   // o jogo mostra "TOQUE PARA ARREMESSAR"; aqui o minigame se chama PING PONG
+        ev.has("PASSE") || ev.has("DEDO") -> Mini.SETA
+        ev.has("TOQUE") && ev.has("RAPIDO") -> Mini.TOQUE
+        // Palavras soltas davam falso positivo no meio da luta: agora exige ENCHER e BARRA juntas. A barra também é achada pela
+        // FORMA (confirmada em combatTick), então o texto genérico não é necessário.
+        cfg.barGame && now() < evWindowUntil && ev.has("ENCHER") && ev.has("BARRA") -> Mini.BARRA
+        else -> null
+    }
+
+    /** Intervalo entre leituras do texto do evento: rápido logo depois de usar um poder (minigame provável), lento no resto. */
+    private fun evGap(): Long = if (now() < evWindowUntil) 90L else 300L
 
     /** Lê o texto do evento em segundo plano (no máximo uma leitura por vez, a cada ~0,15 s). */
     private fun scanEvent(bmp: Bitmap) {
-        if (evBusy || now() - lastEvCheck < 150) return
+        if (evBusy || now() - lastEvCheck < evGap()) return
         evBusy = true
         lastEvCheck = now()
         scope.launch {
@@ -369,15 +454,15 @@ class Brain(
             if (cfg.comboGapMs > 0) delay(cfg.comboGapMs.toLong())
             // Continua lendo o texto do evento DURANTE o combo e sai na hora se apareceu um: antes só olhava no começo de cada
             // rodada (8 arrastos, ~1 s), então o spam do minigame começava quase 1 s atrasado.
-            if (!evBusy && now() - lastEvCheck >= 150) cap.latest()?.let { scanEvent(it) }
+            if (!evBusy && now() - lastEvCheck >= evGap()) cap.latest()?.let { scanEvent(it) }
             if (eventReady()) return
             if (i % 2 == 1) {
                 val b = cap.latest()
                 if (b != null) {
                     val c = Heur.power(b, th, 0.04)
-                    if (cfg.ult && c[0]) { markPower(); g.tap(w * 0.13f, h * 0.905f); lastEvCheck = 0; delay(120); return }
-                    if (c[1]) { markPower(); g.tap(w * 0.236f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }
-                    if (c[4] && c[2]) { markPower(); g.tap(w * 0.343f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }   // poder 2 com X: usa o 1
+                    if (cfg.ult && c[0] && usePower(3)) { markPower(); g.tap(w * 0.13f, h * 0.905f); lastEvCheck = 0; delay(120); return }
+                    if (c[1] && usePower(2)) { markPower(); g.tap(w * 0.236f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }
+                    if (c[4] && c[2] && usePower(1)) { markPower(); g.tap(w * 0.343f, h * 0.905f); lastPower2 = now(); lastEvCheck = 0; delay(120); return }   // poder 2 com X: usa o 1
                 }
             }
         }
@@ -412,16 +497,22 @@ class Brain(
      * PASSE O DEDO RÁPIDO: a cada quadro acha a seta, pega o CENTRO dela e arrasta ao longo da seta passando
      * por esse centro. Repete enquanto houver seta (pode vir mais de uma, em direções diferentes). O texto do evento
      * some logo (no print já não aparece com a seta na tela), então o fim é decidido pela SETA: some por ~0,7 s = acabou.
+     * Devolve true se achou a seta ao menos uma vez (minigame de verdade), false se foi alarme falso do texto.
      */
-    private suspend fun swipeEvent(g: BotAccessibilityService) {
+    private suspend fun swipeEvent(g: BotAccessibilityService): Boolean {
         val t0 = now()
         val end = t0 + 8000
         var misses = 0
         var did = 0
+        var seen = false
         while (currentCoroutineContext().isActive && now() < end) {
             val bmp = cap.latest() ?: break
-            val snap = Heur.snap(bmp)
-            val a = try { snap.arrow() } finally { snap.release() }
+            val a = Heur.arrowFast(bmp)   // recorta antes de converter: bem mais leve que o quadro todo
+            // A seta do ARREMESSAR (que vai e volta) também é azul e comprida: sem esta checagem o bot continuava arrastando
+            // nela depois que o minigame trocou. Se o texto de ARREMESSAR apareceu, sai e deixa o combate tratar.
+            scanEvent(bmp)
+            val evx = evScreen
+            if (evx != null && evAt > t0 + 200 && evx.has("ARREMESS")) { chainEv = true; break }
             val w = bmp.width.toFloat()
             val h = bmp.height.toFloat()
             if (a == null) {
@@ -431,12 +522,13 @@ class Brain(
                     g.swipe(w * 0.584f, h * 0.22f, w * 0.584f, h * 0.78f, 80)
                     did++
                 }
-                if (did <= 1 && misses >= 8) break   // nunca achou seta de verdade
-                if (misses >= 14) break               // já vinha achando e ela sumiu
-                delay(40)
+                if (did <= 1 && misses >= 12) break   // nunca achou seta de verdade (leitura mais rápida: mais tentativas na mesma janela)
+                if (misses >= 20) break               // já vinha achando e ela sumiu
+                delay(20)
                 continue
             }
             misses = 0
+            seen = true
             if (arrowDebug < 3) { saveDebug(bmp, "seta_ok"); arrowDebug++ }
             val cx = a.cx * w
             val cy = a.cy * h
@@ -452,6 +544,7 @@ class Brain(
             }
             did += 2
         }
+        return seen
     }
 
     /**
@@ -483,18 +576,18 @@ class Brain(
     }
 
     /**
-     * TOQUE PARA ARREMESSAR: o marcador ainda não foi mapeado (o print mostra uma barra vertical em forma de ampulheta
+     * PING PONG (texto do jogo: "TOQUE PARA ARREMESSAR"): o marcador ainda não foi mapeado (o print mostra uma barra vertical em forma de ampulheta
      * com uma mira no centro; parece ser preciso tocar quando algo chega ao centro da mira).
      * Por ora toca depois de um atraso configurável, na mira, e grava ~2,4 s de quadros (24 quadros) nas 2 primeiras vezes,
      * em segundo plano, para a gente ver o movimento e acertar o momento.
      */
-    private suspend fun toss(g: BotAccessibilityService, w: Int, h: Int) {
+    private suspend fun pingPong(g: BotAccessibilityService, w: Int, h: Int) {
         val k = tossDebug
         if (k < 2) {
             tossDebug++
             scope.launch {
                 repeat(24) { n ->
-                    cap.latest()?.let { saveDebug(it, "arremesso${k}_%02d".format(n), 60) }
+                    cap.latest()?.let { saveDebug(it, "pingpong${k}_%02d".format(n), 60) }
                     delay(100)
                 }
             }
@@ -502,6 +595,34 @@ class Brain(
         delay(cfg.tossDelayMs.toLong())
         g.tap(w * 0.565f, h * 0.48f)
         delay(1200)
+    }
+
+    /**
+     * Os minigames da BOLINHA e da BARRA podem aparecer com texto parecido (os dois são de tocar rápido), então o texto não
+     * decide qual é. Quem decide é a FORMA, lida no quadro: círculo com a barra vertical em cima = BARRA; círculo solto (que
+     * não é o da barra) = BOLINHA. Espera até 2,5 s a forma aparecer. Se nada aparecer e o gatilho foi genérico, toca no ponto da barra.
+     */
+    private suspend fun touchGame(g: BotAccessibilityService, w: Int, h: Int, preferBar: Boolean): Boolean {
+        val t0 = now()
+        val waitMs = if (preferBar) 600L else 1500L   // BARRA por texto: espera pouco (a forma também é vigiada em combatTick)
+        while (currentCoroutineContext().isActive && now() - t0 < waitMs) {   // 1,5 s: espera mais que isso só atrasava o combo em falso alarme
+            val b = cap.latest()
+            if (b != null) {
+                val s = Heur.snap(b)
+                var bar: PointF? = null
+                var ballPt: PointF? = null
+                try {
+                    bar = s.barCircle()
+                    if (bar == null) ballPt = s.ball()   // ball() já ignora o círculo da barra
+                } finally { s.release() }
+                if (bar != null && cfg.barGame) { say("Minigame: barra"); mash(g, w, h, bar); return true }
+                if (ballPt != null) { say("Minigame: bolinha"); ball(g, w, h); return true }
+            }
+            delay(40)
+        }
+        // Antes, se só o texto disparou e a forma não apareceu, o bot tocava 4 s às cegas no ponto padrão (travava o combo em falso
+        // alarme). Agora sem forma = não é minigame: não toca em nada.
+        return false   // forma não achada: não conta como minigame confirmado (o chamador bloqueia o gatilho por um tempo)
     }
 
     private fun saveDebug(b: Bitmap, tag: String, quality: Int = 85) {
