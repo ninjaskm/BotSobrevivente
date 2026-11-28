@@ -42,7 +42,7 @@ internal class PowerPolicy(private val config: BotConfig) {
     }
 
     fun recordAction(slot: PowerSlot, now: Long) {
-        if (slot != PowerSlot.ULT) lastPower2At = now
+        if (slot == PowerSlot.SECOND) lastPower2At = now
     }
 
     private fun allow(slot: PowerSlot, now: Long): Boolean {
