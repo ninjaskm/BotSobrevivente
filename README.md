@@ -104,18 +104,15 @@ Salvas em `SharedPreferences("bot")`, editadas na `MainActivity` (botão **Salva
 |---|---|---|---|
 | `fightTarget` | 0 | — | Depois de N lutas, usa "Parar e receber" no lobby. `0` = só para quando o time morrer. |
 | `power1AfterSec` | 0 | — | Usa o poder 1 se ficar N s sem usar o poder 2 (e ele estiver carregado). `0` = nunca por tempo. |
-| `pingLeadMs` | 90 | — | Ping pong, modo manual: antecipação **total** (ms) entre decidir tocar e o toque valer. Com o carimbo do quadro confiável, o bot desconta a idade mediana do quadro e usa o resto como atraso do toque. |
-| `pingTrimMs` | 0 | pode ser negativo | Ping pong, modo automático: ajuste fino somado ao atraso do toque medido. |
-| `pingAuto` | `false` | — | Ping pong: usa o atraso do toque medido (mediana de `gesture_overhead`) em vez de `pingLeadMs`. Exige carimbo confiável e ao menos 5 medições. |
-| `comboSwipes` | 8 | — | Arrastos seguidos por rodada do combo. |
-| `comboBatch` | 3 | 1 a 4 | Arrastos enviados juntos num único gesto. `1` = um por vez (comportamento antigo). |
-| `comboGapMs` | 0 | — | Pausa (ms) entre arrastos do combo. `0` = o mais rápido possível (dentro de um lote o intervalo mínimo é 2 ms). |
+| `comboSwipes` | 6 | — | Arrastos seguidos por rodada do combo. |
+| `comboBatch` | 2 | 1 a 4 | Arrastos enviados juntos num único gesto. `1` = um por vez. |
+| `comboGapMs` | 0 | — | Pausa entre arrastos. `0` = automática, 30% da duração do gesto (aprox. 12–18 ms); valor manual é ampliado em 30%. |
 | `powerPct` | 55 | — | Brilho mínimo (%) do slot para considerar o poder carregado (rótulo na tela: "Brilho da ult", mas vale para os 3 slots). |
 | `captureScalePct` | 100 | 30 a 100 | Tamanho da captura em % da tela. Menor = quadros mais baratos, mas o OCR enxerga letra menor. Vale ao iniciar a captura. |
 | `artMode` | 2 | 0 a 2 | Personagem pela arte na montagem de times: `0` só texto; `1` a arte só ajuda quando o texto falha; `2` também rejeita versão errada. |
 | `artAccept` | 60 | 10 a 99 | Pontuação mínima (%) da arte para **aceitar** uma carta que o OCR não leu. |
 | `artVeto` | 30 | 0 a 90 | Pontuação (%) abaixo da qual a arte **rejeita** a carta que o OCR achou (modo 2). |
-| `phaseSec` | 15 | 3 a 120 | Montagem de times: segundos arrastando a lista para um lado antes de parar, analisar e inverter. |
+| `phaseSec` | 17 | 3 a 120 | Montagem de times: segundos arrastando a lista para um lado antes de inverter a direção. |
 | `block` | `false` | — | Bloqueio com 2 dedos ao fim de cada rodada do combo. |
 | `ult` | `false` | — | Usa o poder 3 (ult). |
 | `barGame` | `true` | — | Liga o minigame de encher a barra. Desligue se ele disparar em falso e atrapalhar o combo. |
@@ -174,7 +171,7 @@ Singleton em `BotAccessibilityService.instance` (nulo = acessibilidade desligada
 Cada gesto mede o atraso do Android além da própria duração (`gesture_overhead`, `_burst`, `_batch` no `perf.txt`); só toques e arrastos curtos entram na mediana usada na antecipação do ping pong.
 
 ### MainActivity
-Interface montada por código: botões dos 3 passos, botão de pausa, campos numéricos de configuração e caixas de seleção ("Bloqueio (2 dedos)", "Usar poder 3 (ult)", "Minigame da barra", "Ping pong: antecipação automática", "Coletar quadros do combate"). Pede `POST_NOTIFICATIONS` ao abrir.
+Interface montada por código: botões dos 3 passos, botão de pausa, campos numéricos de configuração e caixas de seleção ("Bloqueio (2 dedos)", "Usar poder 3 (ult)", "Minigame da barra", "Coletar quadros do combate"). A antecipação do ping pong é calibrada pelo próprio bot. Pede `POST_NOTIFICATIONS` ao abrir.
 
 Em `onResume` tenta `autoEnableAccessibility()` (precisa de `WRITE_SECURE_SETTINGS`): se o serviço não está na lista, adiciona; se ~1,5 s depois ele continua desconectado, **força o religamento** (tira da lista e põe de volta após 400 ms). Em `onResume`/`onPause` também liga/desliga o `pauseListener` para o botão de pausa acompanhar o bot.
 
@@ -253,7 +250,7 @@ Ordem de prioridade a cada volta:
 Usar qualquer poder abre a **janela de minigame de 8 s** (`markPower`).
 
 ### Combo
-`comboSwipes` arrastos horizontais, enviados em lotes de `comboBatch` (1 = um por vez): y aleatório entre 38% e 65% da altura, início em x 56–64%, comprimento 14–20% da largura (máx. ≈ 84%, longe dos botões do Android), duração 40–59 ms. Entre os lotes o combo só **consulta** o vigia (custo zero) e sai na hora se há minigame pronto, barra confirmada ou poder carregado (usa a leitura do vigia se tiver até 300 ms; senão lê o quadro mais recente). Com o poder 2 com X, usa o poder 1 se carregado. Dentro de um lote o combo não pode ser interrompido. No fim da rodada, se `block` estiver ligado, faz o bloqueio de 2 dedos (350 ms).
+`comboSwipes` arrastos horizontais, enviados em lotes de `comboBatch` (padrão: 6 arrastos em 3 lotes de 2): y aleatório entre 38% e 65% da altura, início em x 56–64%, comprimento 14–20% da largura (máx. ≈ 84%, longe dos botões do Android), duração 40–59 ms. A pausa automática entre arrastos é 30% da duração do gesto; um valor configurado manualmente recebe aumento de 30%. Entre os lotes o combo só **consulta** o vigia (custo zero) e sai na hora se há minigame pronto, barra confirmada ou poder carregado (usa a leitura do vigia se tiver até 300 ms; senão lê o quadro mais recente). Com o poder 2 com X, usa o poder 1 se carregado. Dentro de um lote o combo não pode ser interrompido. Ao fim do ciclo, aguarda até 400 ms antes de recomeçar, mas interrompe a pausa se um poder ou minigame ficar pronto; se `block` estiver ligado, executa primeiro o bloqueio de 2 dedos (350 ms).
 
 ### Vigia (`watch`)
 Coroutine própria que, **em combate**, lê cada quadro novo só com recortes pequenos:
@@ -293,9 +290,9 @@ Bloqueio após um evento (`evBlockUntil`): se o minigame **não existia** (a for
 ### 7.1 Ping pong: como o bot acompanha o marcador
 1. A cada quadro novo lê a faixa da barra (x 54–62,5%, y 26–74%, em 100 faixas horizontais) e guarda, por linha, o **menor** brilho já visto (o fundo parado). O marcador é a maior mancha que ficou ≥ 0,15 mais brilhante que esse fundo (massa ≥ 0,35); funciona para qualquer linha clara que se mova.
 2. Com 3 posições seguidas (em até 300 ms) na mesma direção, calcula a velocidade (proporção da altura por segundo; precisa de ≥ 0,05) e o tempo que falta para chegar ao centro (y = 50%).
-3. Se ele vai **para** o centro e falta ≤ 0,12 s (descontada a antecipação), espera o resto e toca. Se está se afastando, espera ele voltar. Se nunca achar o marcador em 2,5 s, ou em 7 s no total, toca uma vez mesmo assim.
-4. **Antecipação:** automática (`pingAuto` com carimbo confiável): mediana do atraso do toque medido + `pingTrimMs`; manual com carimbo: `pingLeadMs` menos a idade mediana do quadro; manual sem carimbo: `pingLeadMs` inteiro.
-5. **Registro:** o toque sai em paralelo e o bot lê quadros por mais 600 ms para ver quando o marcador cruzou o centro de verdade. Cada ping pong escreve uma linha em `debug/pingpong_acertos.txt` (modo, antecipação, idade do quadro, atraso do toque, o que o automático usaria, velocidade, posição, `cruzouApos` e `erroPrevisao`). `erroPrevisao > 0` = o marcador chegou depois do previsto (toque cedo); `< 0` = chegou antes (toque tarde). Isso mede se a **previsão** está certa; o acerto final é o resultado na tela do jogo.
+3. Se ele vai **para** o centro e falta ≤ 0,12 s (descontada a antecipação aprendida), espera o resto e toca. Se está se afastando, espera ele voltar. Se nunca achar o marcador em 2,5 s, ou em 7 s no total, toca uma vez mesmo assim.
+4. **Calibração automática:** começa usando a mediana do atraso dos gestos curtos medidos (`gesture_overhead`), ou 90 ms até haver medições. Depois de cada toque, compara a previsão com o cruzamento real do ponto branco e corrige metade do erro (máximo 40 ms por rodada). O valor aprendido fica salvo no aparelho; não há ajustes manuais na tela.
+5. **Registro:** o toque sai em paralelo e o bot lê quadros por mais 600 ms para ver quando o marcador cruzou o centro de verdade. Cada ping pong escreve uma linha em `debug/pingpong_acertos.txt` com antecipação usada, atraso do toque, velocidade, posição, `cruzouApos` e `erroPrevisao`. `erroPrevisao > 0` = o marcador chegou depois do previsto (toque cedo); `< 0` = chegou antes (toque tarde). Isso mede se a **previsão** está certa; o acerto final é o resultado na tela do jogo.
 6. Nas 2 primeiras vezes grava recortes da barra e um log (`pp{0,1}_NN_*`, `pp{0,1}_TAP_*` e o log `pingpong{0,1}_log_<horário>.txt`).
 
 ---
@@ -325,7 +322,7 @@ Posição na lista = quadrado de destino (1, 2, 3). Há regras para distinguir v
 | 2 | Cavaleiro Arkham (`CAVALEIRO`) | nível ≥ 50 | Rifle Personalizado; Kama do Reino Inferior; Estrela da Manhã de Metal Enésimo |
 | 3 | Caçador de Marte (`DE MARTE`, para não casar com "martelo" nem com o subtítulo do Lobo) | subtítulo "Noite"/"Densa", nível ≥ 50, estrito | Bastões de Escrima Energizados; Armadura Peitoral LexCorp V1; Traje do Caçador de Marte (`CACADOR`) |
 
-Chaves dos equipamentos: `RIFLE`, `ARMADURA`, `REVESTIDO`, `BASTOES`, `MANHA`, `KAMA`, `PLACA`, `MACA`, `DIVINO`, `FACAS`, `CACADOR`. Para itens que o OCR lê mal há palavras alternativas (`gearAlt`: LEXCORP, PERSONALIZADO, REINO, ESCRIMA, ENESIMO, ADEPTO, CAPACETE) e, para a lista de baixo, `ESCRIMA|ENERGIZADOS` nos Bastões.
+Chaves dos equipamentos: `RIFLE`, `ARMADURA`, `REVESTIDO`, `BASTOES`, `MANHA`, `KAMA`, `PLACA`, `MACA`, `DIVINO`, `FACAS`, `CACADOR`. Para itens que o OCR lê mal há palavras alternativas (`gearAlt`: LEXCORP, PERSONALIZADO, REINO, ESCRIMA, ENESIMO, ADEPTO, CAPACETE) e, na lista, `ESCRIMA|ENERGIZADOS` nos Bastões e `REINO|INFERIOR` na Kama.
 
 ### Reconhecimento pela arte (`CardArt`)
 Separa as **versões** da mesma carta sem depender do OCR ler o subtítulo sobre arte brilhante.
@@ -339,14 +336,14 @@ Separa as **versões** da mesma carta sem depender do OCR ler o subtítulo sobre
 
 ### Arrastar personagens/equipamentos (`pickAll`)
 1. **Personagens:** antes de começar, espera a lista parar (2 comparações seguidas iguais, no máximo 2 s). Em seguida **analisa parado** a tela; se um item que falta está visível na lista de baixo, arrasta para o quadrado.
-2. Se não achou, rola a lista em **rodadas**: esquerda → direita → esquerda (`phaseDirs`), cada uma por até `phaseSec` segundos (padrão 15) ou até a lista parar de andar (3 leituras iguais). Cada passo rola 40% do passo cheio (`charStepScale`/`equipStepScale` = 0,4; o passo cheio ≈ 4 cartas) com `scrollStop` (190 ms de movimento + 110 ms parado + 125 ms para assentar antes de ler). Existe um freio para passo grande demais (menos de 10% de palavras em comum entre duas leituras reduz o passo para 0,4), mas como o passo já começa em 0,4 ele só agiria se esse valor inicial fosse aumentado. No fim de cada rodada para 0,5 s e analisa de novo. A partir da 2ª rodada aceita carta com subtítulo ilegível (exceto alvos `strict`: Batman e Caçador de Marte). O `notSub` de um alvo aceita alternativas separadas por `|`.
+2. Se não achou, rola a lista por até `phaseSec` segundos (padrão 17) em cada direção; equipamentos invertem continuamente esquerda/direita, também invertendo antes se a lista parar de andar (3 leituras iguais). Personagens mantêm as rodadas existentes. Cada passo usa `scrollStop`: personagens movem 190 ms, equipamentos 600 ms; ambos ficam parados 110 ms no fim. Antes de ler após cada rolagem, espera 125 ms para personagens e 120 ms para equipamentos. Personagens fazem uma pausa de 0,5 s ao fim de cada rodada. A partir da 2ª rodada aceita carta com subtítulo ilegível (exceto alvos `strict`: Batman e Caçador de Marte). O `notSub` de um alvo aceita alternativas separadas por `|`.
 3. **Personagens, antes de arrastar:** confirma o nome num quadro **novo** (a lista pode ter mexido). Se não confere, volta a analisar; após 3 conferências sem bater, arrasta mesmo assim com a leitura anterior.
 4. **Arrasto do personagem:** segura 0,9 s parado na carta, sobe reto até 40% da altura (350 ms, saindo da faixa da lista para não ler como rolagem), vai ao quadrado (450 ms) e fica parado 0,4 s antes de soltar.
 5. Depois de arrastar confere se a carta saiu da lista. Personagens: até 3 tentativas. Se ainda houver outro à vista arrasta também; senão **continua rolando de onde parou** (mesma direção e rodada, com o cronômetro da rodada zerado).
 6. Sem achar após as 3 rodadas, **personagens**: se o quadrado tem algo lido que não é o nome de outro personagem conhecido, assume que já está certo (quem está no time some da lista) e guarda `debug/personagem_N_assumido_*`; senão desiste com mensagem listando o que faltou.
 
 **Equipamentos** têm particularidades:
-- Usa leitura reforçada (tela inteira + duas metades da lista, para o OCR ler texto pequeno sobre arte brilhante; só as metades enquanto rola) e palavras alternativas por item. Nas paradas faz também uma checagem rápida só da faixa dos 3 quadrados e termina na hora se os 3 já têm o item certo.
+- Lê as duas metades da lista para preservar resolução do nome e reaproveita a leitura dos quadrados; após um arrasto, também confere a faixa de estado/modal. Antes de sair da aba, verifica em quadros diferentes se os 3 quadrados estão ocupados e sem equipamento conhecido como errado; só então volta ao lobby.
 - Item que o próprio personagem já usa **some da lista**; se aparece no quadrado, considera equipado.
 - A cada tentativa usa um **gesto diferente** (4 variantes): arrastar direto; subir (até 52% da altura) e depois ir ao quadrado; tocar no item e depois no quadrado; tocar no quadrado e depois no item. Guarda `debug/equip_tentativa*`.
 - Se o jogo abrir uma janela de confirmação, toca em `SIM`, `CONFIRMAR`, `EQUIPAR`, `TROCAR`, `MOVER`, `SUBSTITUIR` ou `OK` (`debug/equip_janela_*`). Se o gesto abrir outra tela, falha com aviso.

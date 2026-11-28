@@ -52,8 +52,11 @@ internal object TeamCatalog {
         "ARMADURA" to "LEXCORP", "RIFLE" to "PERSONALIZADO", "KAMA" to "REINO", "BASTOES" to "ESCRIMA",
         "MANHA" to "ENESIMO", "FACAS" to "ADEPTO", "DIVINO" to "CAPACETE",
     )
-    // O OCR costuma perder "Bastões" sobre a arte azul; estas palavras aparecem na segunda linha do nome.
-    private val gearListAlt = mapOf("BASTOES" to "ESCRIMA|ENERGIZADOS")
+    // Alternativas únicas para quando o OCR falha na palavra principal, especialmente sobre arte brilhante.
+    private val gearListAlt = mapOf(
+        "BASTOES" to "ESCRIMA|ENERGIZADOS",
+        "KAMA" to "REINO|INFERIOR",
+    )
     private fun gear(label: String, key: String) = Target(label, key, false, alt = gearAlt[key], listAlt = gearListAlt[key])
 
     val equip2 = listOf(

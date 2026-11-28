@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.math.ceil
 import kotlin.random.Random
 
 /** Os minigames dos especiais. A decisão de qual é fica toda em Brain.miniOf (um único lugar). */
@@ -701,13 +702,18 @@ class Brain(
                 val x2 = x1 + w * (0.14f + Random.nextFloat() * 0.06f)   // máx ≈ 0,84: longe dos botões do Android
                 segs.add(SwipeSeg(x1, y, x2, y, 40L + Random.nextInt(20)))
             }
+            val gapMs = if (cfg.comboGapMs > 0) {
+                ceil(cfg.comboGapMs * 1.3).toLong().coerceAtLeast(cfg.comboGapMs + 1L)
+            } else {
+                ceil(segs.map { it.dur }.average() * 0.30).toLong().coerceAtLeast(2L)
+            }
             // Lote: vários arrastos num único gesto (menos ida e volta ao sistema). Com lote 1 é o comportamento antigo.
             if (n == 1) {
                 val s = segs[0]
                 g.swipe(s.x1, s.y1, s.x2, s.y2, s.dur)
-                if (cfg.comboGapMs > 0) delay(cfg.comboGapMs.toLong())
+                delay(gapMs)
             } else {
-                g.swipeBatch(segs, cfg.comboGapMs.toLong())
+                g.swipeBatch(segs, gapMs)
             }
             done += n
             // O vigia já lê o texto do evento, a barra e os poderes em paralelo. Aqui só se consulta o resultado (custo zero)
@@ -718,6 +724,15 @@ class Brain(
             if (c != null && useReadyPower(c, g, w, h)) return
         }
         if (cfg.block && !paused) g.block(w, h, 350)
+        // Pausa entre combos, não um atraso cego: poder ou minigame pronto interrompe o intervalo.
+        val nextComboAt = now() + 400L
+        while (!paused && now() < nextComboAt) {
+            if (eventReady() || barReady()) return
+            val c = freshPower(th)
+            if (c != null && useReadyPower(c, g, w, h)) return
+            val remaining = nextComboAt - now()
+            if (remaining > 0) delay(minOf(20L, remaining))
+        }
     }
 
     /** A forma da barra já foi confirmada pelo vigia e ainda está fresca? */
@@ -966,9 +981,9 @@ class Brain(
      *  1) A cada quadro lê a faixa da barra e guarda, por linha, o menor brilho já visto (o fundo parado). O marcador é o que aparece
      *     de brilhante por cima desse fundo (Heur.pingProfile + pingMarker). Funciona para qualquer seta/linha clara que se mova.
      *  2) Com 3 posições seguidas na mesma direção tira a velocidade e calcula quanto falta para chegar ao centro.
-     *  3) Se ele vai PARA o centro e falta pouco, espera o resto (menos `pingLeadMs`, que cobre a captura e o atraso do toque) e toca.
+     *  3) Se ele vai PARA o centro, prevê a chegada, compensa o atraso do toque aprendido e toca.
      *     Se está se afastando, espera ele voltar (bate e volta). Se nunca achar o marcador (2,5 s), toca uma vez mesmo assim.
-     * Nas 2 primeiras vezes grava recortes da barra e um log em debug/ (pp*), para ajustar a medida e a antecedência.
+     * Depois do toque mede quando o marcador cruzou o ponto branco e ajusta a antecipação salva automaticamente.
      */
     private suspend fun pingPong(g: BotAccessibilityService, w: Int, h: Int) {
         val k = tossDebug
@@ -980,21 +995,10 @@ class Brain(
         val ys = ArrayList<Float>()
         val log = StringBuilder()
         val t0 = now()
-        // Antecipação: com o carimbo do quadro confiável, o tempo da captura já é exato (tc abaixo) e a antecipação cobre só o atraso do toque.
-        //  - automático (cfg.pingAuto): mediana do atraso do toque medido (gesture_overhead) + ajuste fino;
-        //  - manual: pingLeadMs (total) menos a idade mediana do quadro; sem carimbo confiável, pingLeadMs inteiro como antes.
-        val ageMed = Perf.frameAgeMs.median()
-        val ageMs = ageMed ?: 0L
+        // Usa o atraso aprendido pelos acertos anteriores; antes de aprender, usa a mediana medida ou 90 ms iniciais.
         val ovMed = Perf.overheadMs.median()
-        val tsMode = cap.tsValid && ageMed != null
-        val manualLead = cfg.pingLeadMs.toLong()
-        val autoLead: Long? = if (tsMode && ovMed != null && Perf.overheadMs.count() >= 5) (ovMed + cfg.pingTrimMs).coerceAtLeast(0L) else null
-        val autoOn = cfg.pingAuto && autoLead != null
-        val lead: Long = when {
-            autoOn -> autoLead!!
-            tsMode -> (manualLead - ageMs).coerceAtLeast(0L)
-            else -> manualLead
-        }
+        val measuredLead = if (ovMed != null && Perf.overheadMs.count() >= 5) ovMed else 90L
+        val lead = (cfg.pingLearnedLeadMs.takeIf { it >= 0 }?.toLong() ?: measuredLead).coerceIn(0L, 400L)
         var lastBmp: Bitmap? = null
         var tapJob: Job? = null
         var tReq = 0L
@@ -1082,10 +1086,15 @@ class Brain(
                     break
                 }
             }
-            val modo = if (autoOn) "auto" else if (tsMode) "manual+carimbo" else "manual+relogio"
-            val linha = "${java.util.Date()} modo=$modo lead=${lead}ms idadeQuadro=${ageMs}ms atrasoToque=${ovMed ?: -1}ms " +
-                "autoEstimaria=${autoLead ?: -1}ms v=${"%.3f".format(vTap)} yNoPedido=${"%.3f".format(yEst)} " +
-                (if (cross >= 0) "cruzouApos=${cross - tReq}ms erroPrevisao=${cross - (tReq + lead)}ms" else "cruzou=nao_visto") + "\n"
+            val error = if (cross >= 0) cross - (tReq + lead) else Long.MIN_VALUE
+            if (error != Long.MIN_VALUE) {
+                // Erro positivo = tocou cedo; reduz a antecipação. Negativo = tocou tarde; aumenta. Corrige metade, limitado a 40 ms por rodada.
+                val adjustment = (error / 2).coerceIn(-40L, 40L)
+                cfg.pingLearnedLeadMs = (lead - adjustment).coerceIn(0L, 400L).toInt()
+            }
+            val linha = "${java.util.Date()} modo=auto lead=${lead}ms atrasoToque=${ovMed ?: -1}ms " +
+                "v=${"%.3f".format(vTap)} yNoPedido=${"%.3f".format(yEst)} " +
+                (if (cross >= 0) "cruzouApos=${cross - tReq}ms erroPrevisao=$error" else "cruzou=nao_visto") + "\n"
             runCatching { File(debugDir, "pingpong_acertos.txt").appendText(linha) }
             if (rec) log.append(linha)
         }

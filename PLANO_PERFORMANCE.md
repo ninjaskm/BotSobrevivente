@@ -54,9 +54,9 @@ Sem esses três arquivos qualquer "otimização" nova é chute.
 | D3 | Percepção e ação rodam em série; poder só era lido a cada 2 arrastos. | **Feito (fase 2):** vigia em paralelo. |
 | D4 | Cada arrasto do combo era um `dispatchGesture` separado. | **Feito (fase 2):** `swipeBatch`. |
 | D5 | Limiares de cor calibrados com poucos prints. | Aberto. O modo de coleta (fase 0) junta os quadros para reajustar depois. |
-| D6 | Atraso real do toque desconhecido; `pingLeadMs` chutado. | **Feito (fase 3):** medição e autocalibração opcional. |
+| D6 | Atraso real do toque desconhecido. | **Feito (fase 3):** medição e autocalibração contínua pelo cruzamento real do ponto branco. |
 | D7 | O nome da carta é a única identidade do personagem. | Aberto (fase 4). |
-| D9 | Higiene (`tossDelayMs` morto, `pingLeadMs` sem campo, `debug/` sem limite). | **Feito** nos itens de configuração e limpeza; o reset de `team`/`fights` segue na fase 7. |
+| D9 | Higiene (`tossDelayMs` morto, controles manuais de ping pong, `debug/` sem limite). | **Feito** nos itens de configuração e limpeza; o reset de `team`/`fights` segue na fase 7. |
 
 ---
 
@@ -121,17 +121,15 @@ Como validar (no `perf.txt` e na luta):
 
 Feito no código:
 - [x] **Horário real do quadro:** `Capture.latestFrame()` devolve o quadro junto com o horário em que foi **capturado** (carimbo do `Image`, convertido para `currentTimeMillis`). O carimbo só é usado se parecer estar na base de `System.nanoTime()` (idade entre 0 e 1 s); a idade medida aparece no `perf.txt` como `frame_age`. Se não for confiável, o bot cai no horário de leitura, como antes.
-- [x] **Antecipação:**
-  - Manual (padrão): `pingLeadMs` continua sendo a antecipação TOTAL. Com o carimbo confiável, o bot desconta a idade mediana do quadro e usa o resto como atraso do toque. O comportamento total fica o mesmo, com menos oscilação.
-  - Automático (caixa "Ping pong: antecipação automática"): usa a mediana do atraso do toque medido (`gesture_overhead`, só toques e arrastos curtos) + `Ajuste fino`. **Desligado por padrão**, porque o atraso medido inclui também a espera depois do toque e pode passar do atraso real até o jogo registrar. Ligue só depois de conferir o registro abaixo.
-- [x] **UI:** `tossDelayMs` (campo morto) removido; `Antecipação do ping pong`, `Ajuste fino` e a caixa automática adicionados.
-- [x] **Registro do acerto:** o toque sai em paralelo e o bot lê quadros por mais 600 ms. Cada ping pong escreve uma linha em `debug/pingpong_acertos.txt` com o modo, a antecipação usada, a idade do quadro, o atraso do toque medido, o que o modo automático teria usado, a velocidade e posição estimadas e **quando o marcador cruzou o centro de verdade** (`cruzouApos`, `erroPrevisao`).
+- [x] **Antecipação automática:** começa pela mediana do atraso medido (`gesture_overhead`) ou 90 ms até haver amostras; após cada toque, compara com o cruzamento real e corrige metade do erro (limitado a 40 ms por rodada). A calibração fica salva no aparelho.
+- [x] **UI:** removidos os controles manuais/automáticos de antecipação; o ping pong se calibra sozinho.
+- [x] **Registro do acerto:** o toque sai em paralelo e o bot lê quadros por mais 600 ms. Cada ping pong escreve uma linha em `debug/pingpong_acertos.txt` com a antecipação usada, o atraso medido, velocidade e posição estimadas e **quando o marcador cruzou o centro de verdade** (`cruzouApos`, `erroPrevisao`).
   - `erroPrevisao > 0`: o marcador chegou depois do que o bot previu (toque cedo). `< 0`: chegou antes (toque tarde).
   - Limite do que isso mede: mostra se a **previsão do cruzamento** está certa, não em que instante o jogo registrou o toque. O acerto final continua sendo o resultado na tela do jogo.
 
 Falta você fazer:
-- [ ] Rodar 10 ping pongs e ler o `pingpong_acertos.txt`. Se `erroPrevisao` fica perto de 0, a previsão está boa; ajuste `pingLeadMs` (ou o `Ajuste fino`, no automático) pelo resultado no jogo.
-- [ ] Conferir no `perf.txt` se `frame_age` aparece (carimbo válido). Se não aparecer, o modo é "manual+relogio" e funciona como antes.
+- [ ] Rodar ping pongs e conferir se `erroPrevisao` se aproxima de 0 com as rodadas; confirmar o acerto final pelo resultado do jogo.
+- [ ] Conferir no `perf.txt` se `frame_age` aparece; sem carimbo confiável, a precisão ainda pode variar com atraso da captura.
 - **Regra de decisão sobre injeção de toque rápida (Shizuku, ADB wireless):** só avaliar se a mediana de `gesture_overhead` > **80 ms** e o ping pong errar mais de 1 em 5 mesmo depois do ajuste. Custo: configuração extra no aparelho e dependência de um serviço externo.
 
 Aceite: ≥ 9 acertos em 10 ping pongs seguidos (resultado no jogo) e `erroPrevisao` estável no log.
@@ -234,7 +232,7 @@ Fase 7: a qualquer momento.
 | Reduzir a captura desalinha os toques ou piora o OCR de equipamentos. | `captureScalePct` fica em 100 por padrão; ao testar menos, confira um toque conhecido (ex.: poder 2) e uma montagem de time. |
 | Lote de arrastos tira a capacidade de interromper o combo. | Lotes curtos (máx. 4); `Arrastos por lote = 1` volta ao antigo. |
 | `Image.timestamp` não está na base de `System.nanoTime()`. | O bot detecta (idade fora de 0 a 1 s) e usa o horário de leitura. |
-| O atraso do toque medido passa do real. | Modo automático desligado por padrão; use o registro `pingpong_acertos.txt` e o `Ajuste fino`. |
+| A previsão inicial do toque tem erro. | A calibração ajusta metade do erro observado no cruzamento real, limitado a 40 ms por rodada; confira `pingpong_acertos.txt`. |
 | O vigia e o ping pong disputam a CPU. | O vigia fica em espera enquanto um minigame roda (`watcherHold`). Com a coleta ligada ele ainda grava quadros nesse período. |
 | Detector erra em efeitos novos. | Fallback para heurísticas; continuar coletando quadros. |
 | Os limiares ficam bons só neste aparelho. | Guardar o modelo do aparelho no log de sessão (fase 7) e reabrir a coleta ao trocar de aparelho. |

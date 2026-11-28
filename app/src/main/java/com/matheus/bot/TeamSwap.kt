@@ -52,11 +52,13 @@ class TeamSwap(
     private val dragHoldMs = 900L
     private val dragMoveMs = 700L
 
-    // Rolagem da lista (personagens E equipamentos, mesmos valores pedidos): movimento 190 ms + parado no fim 110 ms + espera antes de ler 125 ms.
-    // Referência: os equipamentos usavam 350 + 200 + 300; os personagens já foram 100 + 57 + 70 (rápido demais).
+    // Busca: equipamentos movem 600 ms e esperam 120 ms antes do OCR; personagens movem 190 ms e esperam 125 ms.
+    // Ambos mantêm 110 ms parado no fim do gesto para a lista não ganhar impulso.
     private val charScrollMoveMs = 190L
+    private val equipScrollMoveMs = 600L
     private val charScrollHoldMs = 110L
     private val charSettleMs = 125L
+    private val equipScrollSettleMs = 120L
 
     // Faixas da tela (x0, y0, x1, y1) para ler só onde o botão está: o OCR da tela inteira é bem mais lento.
     private val rBottom = floatArrayOf(0f, 0.6f, 1f, 1f)       // RECEBER / EQUIPE do lobby
@@ -121,19 +123,7 @@ class TeamSwap(
         matches(wd, t) || (t.listAlt != null && t.listAlt.split('|').any { wd.text.contains(it) })
 
     /**
-     * Leitura reforçada para a lista de EQUIPAMENTOS: letras pequenas sobre arte brilhante. Além do quadro inteiro, lê a lista de
-     * baixo em duas metades (cada uma com ~2x a resolução que o OCR teria no quadro inteiro) e junta tudo.
-     */
-    private suspend fun readBoosted(b: Bitmap): Screen {
-        val full = text.read(b)
-        val left = text.read(b, 0f, 0.58f, 0.56f, 0.97f)
-        val right = text.read(b, 0.44f, 0.58f, 1f, 0.97f)
-        return Screen(full.words + left.words + right.words)
-    }
-
-    /**
-     * Leitura só da LISTA de equipamentos (as duas metades, sem o quadro inteiro): ~40% mais leve que `readBoosted`. Usada enquanto
-     * só se rola a lista; nas paradas para analisar (que olham os quadrados) continua a leitura completa.
+     * Leitura da lista de equipamentos em duas metades. O recorte mantém mais resolução nas letras pequenas das cartas.
      */
     private suspend fun readListBoosted(b: Bitmap): Screen {
         val left = text.read(b, 0f, 0.58f, 0.56f, 0.97f)
@@ -348,8 +338,8 @@ class TeamSwap(
      * Completa os 3 quadrados. Para cada personagem que falta:
      *  1) Primeiro só ANALISA a tela, parado. Se algum dos que faltam está na lista, arrasta (segurando) para o quadrado.
      *  2) Se não achou, 1ª rodada: arrasta a lista para a ESQUERDA, lendo a tela a cada passo, por `phaseMs`.
-     *  3) Acabou o tempo (ou a lista parou de andar): PARA, espera `settleMs` e analisa de novo, parado. Achou: arrasta.
-     *     Não achou: 2ª rodada, para a DIREITA. Mesmo fim: para, analisa; 3ª rodada, para a ESQUERDA (`phaseDirs`).
+     *  3) Acabou o tempo (ou a lista parou de andar): personagens fazem as rodadas finitas; equipamentos invertem
+     *     a direção continuamente (ping-pong), sem pausa longa, até localizar o item.
      *  4) Acabou a 3ª rodada: para, analisa e começa outra varredura se ainda faltar algo.
      * Depois de arrastar um personagem: solta, volta a ANALISAR (parado). Se a carta ainda aparece na lista, tenta de novo sem limite;
      * se saiu da lista, está no quadrado. Se ainda há outro personagem à vista, arrasta também;
@@ -376,21 +366,26 @@ class TeamSwap(
             if (isPaused()) return "Troca pausada"
             val b = cap.latest()
             if (b == null) { delay(200); continue }
-            // CHECAGEM RÁPIDA dos quadrados (equipamentos): lê só a faixa dos 3 quadrados (1 leitura pequena) em vez da leitura reforçada da
-            // lista inteira (3 leituras). Se os 3 já têm o item certo, termina na hora (e o bot toca em CANCELAR logo); é também o que
-            // confirma mais rápido cada arrasto. Se não, segue para a leitura completa abaixo.
-            // Só nas paradas (antes de começar a rolar e logo depois de arrastar): rolando, os quadrados não mudam e isto só atrasaria.
-            if (lay.staysInList && (phaseStart < 0 || dragged >= 0)) {
-                val q = text.read(b, 0.15f, 0.28f, 0.85f, 0.52f)
-                for (i in list.indices) if (!done[i] && inSlot(q, list[i], i, lay)) done[i] = true
+            // Leia os quadrados só quando parado. Reutilize esse OCR na leitura principal para não analisar a mesma região duas vezes.
+            val equipmentSlots = if (lay.staysInList && (phaseStart < 0 || dragged >= 0))
+                text.read(b, 0.15f, 0.28f, 0.85f, 0.52f)
+            else null
+            if (equipmentSlots != null) {
+                for (i in list.indices) if (!done[i] && inSlot(equipmentSlots, list[i], i, lay)) done[i] = true
                 if (done.all { it }) return null
             }
-            // Enquanto só está ROLANDO a lista, lê apenas a faixa de baixo (a lista): personagens, ~40% menos pixels; equipamentos, sem o
-            // quadro inteiro. Nas paradas para analisar (início de rodada, depois de arrastar, fim das rodadas) lê a tela toda (quadrados).
+            // Enquanto rola, lê só a lista. Parado, combina as duas metades da lista com o OCR dos quadrados já feito acima;
+            // após um arrasto, acrescenta uma faixa de estado para verificar modal ou mudança de tela.
             val rolling = phaseStart >= 0 && dragged < 0
             val s = when {
                 lay.staysInList && rolling -> readListBoosted(b)
-                lay.staysInList -> readBoosted(b)
+                lay.staysInList -> {
+                    // No primeiro scan, priorize as cartas visíveis e os quadrados já lidos; evite OCR da tela inteira.
+                    // Depois de arrastar, acrescente uma faixa de estado para detectar confirmação/modal ou saída do seletor.
+                    val items = readListBoosted(b)
+                    val state = if (dragged >= 0) text.read(b, 0.15f, 0.15f, 1f, 0.82f) else null
+                    Screen(equipmentSlots!!.words + items.words + (state?.words ?: emptyList()))
+                }
                 rolling -> text.read(b, 0f, 0.40f, 1f, 1f)
                 else -> text.read(b)
             }
@@ -483,6 +478,20 @@ class TeamSwap(
             if (i != null) {
                 val t = list[i]
                 val w0 = found.getValue(i)
+                // Antes de arrastar um equipamento, confira novamente o quadrado de destino num quadro recente.
+                // O item pode já ter sido equipado numa tentativa anterior ou reconhecido com atraso pelo OCR da lista.
+                if (lay.staysInList) {
+                    val latest = cap.latest()
+                    if (latest != null) {
+                        val slotsNow = text.read(latest, 0.15f, 0.28f, 0.85f, 0.52f)
+                        if (inSlot(slotsNow, t, i, lay)) {
+                            done[i] = true
+                            debug(latest, "equip_${i + 1}_ja_equipado_antes_arrasto")
+                            say("${t.label} já está equipado no quadrado ${i + 1}; seguindo para o próximo item.")
+                            continue
+                        }
+                    }
+                }
                 // Personagens: ANTES de arrastar confirma o NOME num quadro NOVO (a leitura de cima pode ser de uns 0,3 s atrás e a lista
                 // pode ter mexido). Se o personagem certo não está mais ali (ou andou), não arrasta: volta a analisar. Usa a posição
                 // nova. Depois de 3 conferências seguidas sem bater, arrasta mesmo assim com a leitura de cima (já tem versão e nível conferidos).
@@ -597,12 +606,13 @@ class TeamSwap(
                 }
                 val missing = list.filterIndexed { k, _ -> !done[k] }.joinToString { it.label }
                 say("Ainda procurando $missing; vou reiniciar a varredura da lista.")
-                phase = 0
+                // Equipamentos ficam alternando: a sequência continua direita/esquerda sem reiniciar sempre para o mesmo lado.
+                phase = if (lay.staysInList) 1 else 0
                 phaseStart = -1L
                 steps = 0
                 stuck = 0
                 lastSig = emptySet()
-                delay(settleMs)
+                if (!lay.staysInList) delay(settleMs)
                 continue
             }
             if (phaseStart < 0) phaseStart = now()   // começa a rodada de arrastos
@@ -620,12 +630,14 @@ class TeamSwap(
             }
             lastSig = sig
             if (now() - phaseStart > phaseMs || stuck >= 3) {
-                // Fim da rodada (tempo ou fim da lista): PARA, espera a lista assentar e volta a analisar.
+                // Fim da rodada (tempo ou fim da lista): inverte logo a direção dos equipamentos; a leitura após cada gesto
+                // já inclui o tempo curto para a lista assentar. Personagens mantêm a pausa entre rodadas.
                 val dirTxt = if (phaseDirs[phase] > 0) "direita" else "esquerda"
                 phase++
                 phaseStart = -1L; steps = 0; stuck = 0; lastSig = emptySet()
-                say("Parei de arrastar para a $dirTxt sem achar $falta. Analisando de novo...")
-                delay(settleMs)
+                say(if (lay.staysInList) "Fim do trecho para a $dirTxt sem achar $falta; invertendo o arrasto e continuando a busca."
+                    else "Parei de arrastar para a $dirTxt sem achar $falta. Analisando de novo...")
+                if (!lay.staysInList) delay(settleMs)
                 continue
             }
             val dir = phaseDirs[phase]
@@ -638,11 +650,11 @@ class TeamSwap(
             val half = (lay.scrollFrom - lay.scrollTo) / 2f * sc
             val fromX = b.width * (mid + half)
             val toX = b.width * (mid - half)
-            val mvMs = charScrollMoveMs   // mesmos tempos para personagens e equipamentos
+            val mvMs = if (lay.staysInList) equipScrollMoveMs else charScrollMoveMs
             val hdMs = charScrollHoldMs
             if (dir > 0) g.scrollStop(toX, y, fromX, y, mvMs, hdMs)
             else g.scrollStop(fromX, y, toX, y, mvMs, hdMs)
-            delay(charSettleMs)   // espera a lista assentar antes de ler
+            delay(if (lay.staysInList) equipScrollSettleMs else charSettleMs)
         }
         return if (isPaused()) "Troca pausada" else "Troca cancelada"
     }
@@ -876,11 +888,33 @@ class TeamSwap(
         return false
     }
 
+    /** Confirma em quadros diferentes que os três quadrados estão ocupados e sem equipamento conhecido como errado. */
+    private suspend fun confirmEquipmentSlots(list: List<Target>, lay: Layout): Boolean {
+        val hits = IntArray(list.size)
+        var lastFrame: Bitmap? = null
+        var reads = 0
+        while (currentCoroutineContext().isActive && !isPaused() && reads < 4) {
+            val frame = cap.latestFrame()
+            if (frame == null || frame.first === lastFrame) { delay(20); continue }
+            lastFrame = frame.first
+            reads++
+            val s = text.read(frame.first, 0.15f, 0.28f, 0.85f, 0.52f)
+            for (i in list.indices) {
+                val wrong = wrongItemName(s, list[i], i, lay)
+                val matchesExpected = slotHas(s, list[i], i, lay)
+                // Alguns nomes pequenos não são lidos pelo OCR; aceita o slot ocupado apenas se não houver equipamento conhecido como errado.
+                val acceptable = wrong == null && (matchesExpected || slotOccupied(s, i, lay))
+                hits[i] = if (acceptable) (hits[i] + 1).coerceAtMost(2) else (hits[i] - 1).coerceAtLeast(0)
+            }
+            if (hits.all { it >= 2 }) return true
+            delay(50)
+        }
+        return false
+    }
+
     /**
-     * Equipa os 3 personagens do time, um por vez: entra na escolha de equipamentos, arrasta os 3 itens para os quadrados 1, 2 e 3
-     * (mesma lógica do arrasto de personagens: acha pelo nome, rola a lista, segura e arrasta) e sai de volta ao lobby.
-     * Se um quadrado já tem o item certo (nome lido no quadrado), não mexe nele.
-     * Devolve null se deu certo, ou a mensagem do que falhou.
+     * Equipa os 3 personagens do time, um por vez: entra na escolha de equipamentos, preenche os três quadrados, confirma-os e volta ao lobby.
+     * Se um quadrado já tem o item certo, não mexe nele. Devolve null se deu certo, ou a mensagem do que falhou.
      */
     private suspend fun equipTeam(g: BotAccessibilityService, loadout: List<List<Target>>, chars: List<Target>): String? {
         for (idx in 0 until 3) {
@@ -896,14 +930,24 @@ class TeamSwap(
                     delay(1200)
                     continue
                 }
-                delay(250)
-                val error = pickAll(g, loadout[idx], lay = equipLayout)
-                if (error != null) {
-                    if (isPaused()) return error
-                    say("$error. Vou repetir a equipagem deste personagem.")
-                    delay(1000)
-                    continue
+                // Aguarda a tela de equipamentos terminar a transição antes da primeira leitura ou gesto.
+                delay(2000)
+                var equipped = false
+                while (!equipped && !isPaused()) {
+                    val error = pickAll(g, loadout[idx], lay = equipLayout)
+                    if (error != null) {
+                        if (isPaused()) return error
+                        say("$error. Vou repetir a equipagem deste personagem.")
+                        delay(1000)
+                        continue
+                    }
+                    equipped = confirmEquipmentSlots(loadout[idx], equipLayout)
+                    if (!equipped && !isPaused()) {
+                        say("Conferindo os equipamentos nos 3 quadrados antes de sair...")
+                        delay(200)
+                    }
                 }
+                if (isPaused()) return "Equipamento pausado"
                 delay(60)
                 cap.latest()?.let { debug(it, "equip_p${idx + 1}_final") }
                 if (!exitToLobby(g)) {

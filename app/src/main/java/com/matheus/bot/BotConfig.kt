@@ -6,6 +6,23 @@ import android.content.Context
 class BotConfig(ctx: Context) {
     private val p = ctx.getSharedPreferences("bot", Context.MODE_PRIVATE)
 
+    init {
+        // Atualiza instalações que ainda estavam nos padrões antigos (8 arrastos em lotes de 3), sem sobrescrever
+        // valores personalizados diferentes desses padrões.
+        if (!p.getBoolean("comboPattern2x2x2Applied", false)) {
+            val edit = p.edit()
+            if (p.getInt("comboSwipes", 8) == 8) edit.putInt("comboSwipes", 6)
+            if (p.getInt("comboBatch", 3) == 3) edit.putInt("comboBatch", 2)
+            edit.putBoolean("comboPattern2x2x2Applied", true).apply()
+        }
+        // Atualiza o padrão de busca para 17 s também em instalações existentes, sem alterar tempos personalizados.
+        if (!p.getBoolean("phaseSec17DefaultApplied", false)) {
+            val edit = p.edit()
+            if (p.getInt("phaseSec", 15) == 15) edit.putInt("phaseSec", 17)
+            edit.putBoolean("phaseSec17DefaultApplied", true).apply()
+        }
+    }
+
     /** Depois de N lutas, vai em "Parar e receber". 0 = só para quando o time morrer. */
     var fightTarget: Int
         get() = p.getInt("fightTarget", 0)
@@ -26,38 +43,22 @@ class BotConfig(ctx: Context) {
         get() = p.getInt("power1AfterSec", 0)
         set(v) = p.edit().putInt("power1AfterSec", v).apply()
 
-    /**
-     * PING PONG, modo manual: antecipação TOTAL (ms) entre o bot decidir tocar e o toque valer (cobre a captura e o atraso do toque).
-     * Quando o carimbo do quadro é confiável, o bot desconta a idade medida do quadro e usa só o resto como atraso do toque.
-     */
-    var pingLeadMs: Int
-        get() = p.getInt("pingLeadMs", 90)
-        set(v) = p.edit().putInt("pingLeadMs", v).apply()
-
-    /** PING PONG, modo automático: ajuste fino (ms, pode ser negativo) somado ao atraso do toque medido. */
-    var pingTrimMs: Int
-        get() = p.getInt("pingTrimMs", 0)
-        set(v) = p.edit().putInt("pingTrimMs", v).apply()
-
-    /**
-     * PING PONG: usa o atraso do toque medido (mediana de `gesture_overhead`) em vez de `pingLeadMs`. Desligado por padrão até você
-     * conferir em debug/pingpong_acertos.txt que a previsão acerta (o atraso medido inclui a espera depois do toque e pode passar do real).
-     */
-    var pingAuto: Boolean
-        get() = p.getBoolean("pingAuto", false)
-        set(v) = p.edit().putBoolean("pingAuto", v).apply()
+    /** Antecipação aprendida pelo ping pong. -1 significa que ainda não houve um acerto medido. */
+    internal var pingLearnedLeadMs: Int
+        get() = p.getInt("pingLearnedLeadMs", -1)
+        set(v) = p.edit().putInt("pingLearnedLeadMs", v).apply()
 
     /** Quantos arrastos seguidos por rodada do combo (spam). */
     var comboSwipes: Int
-        get() = p.getInt("comboSwipes", 8)
+        get() = p.getInt("comboSwipes", 6)
         set(v) = p.edit().putInt("comboSwipes", v).apply()
 
     /** Arrastos enviados juntos num único gesto (1 = um por vez, como antes; máximo 4). Menos ida e volta ao sistema, mas o combo só pode ser interrompido entre lotes. */
     var comboBatch: Int
-        get() = p.getInt("comboBatch", 3)
+        get() = p.getInt("comboBatch", 2)
         set(v) = p.edit().putInt("comboBatch", v).apply()
 
-    /** Pausa (ms) entre arrastos do combo. 0 = o mais rápido possível. */
+    /** Pausa configurada entre arrastos do combo. 0 = pausa automática calculada no Brain. */
     var comboGapMs: Int
         get() = p.getInt("comboGapMs", 0)
         set(v) = p.edit().putInt("comboGapMs", v).apply()
@@ -102,10 +103,10 @@ class BotConfig(ctx: Context) {
         set(v) = p.edit().putInt("artVeto", v).apply()
 
     /**
-     * Montagem de times: segundos arrastando a lista para UM lado antes de parar, analisar e inverter a direção (esquerda -> direita -> esquerda).
+     * Montagem de times: segundos arrastando a lista para UM lado antes de parar, analisar e inverter a direção.
      * A rodada também acaba antes se a lista parar de andar (chegou ao fim). Era 50 s fixos.
      */
     var phaseSec: Int
-        get() = p.getInt("phaseSec", 15)
+        get() = p.getInt("phaseSec", 17)
         set(v) = p.edit().putInt("phaseSec", v).apply()
 }
