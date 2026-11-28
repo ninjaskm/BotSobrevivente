@@ -565,9 +565,8 @@ class TeamSwap(
                     dragScreen = Screen(freshList.words + slotsNow.words)
                     w = freshWord
                 }
-                // Personagens: ANTES de arrastar confirma o NOME num quadro NOVO (a leitura de cima pode ser de uns 0,3 s atrás e a lista
-                // pode ter mexido). Se o personagem certo não está mais ali (ou andou), não arrasta: volta a analisar. Usa a posição
-                // nova. Depois de 3 conferências seguidas sem bater, arrasta mesmo assim com a leitura de cima (já tem versão e nível conferidos).
+                // Personagens: exige confirmar o NOME e a posição num quadro NOVO. Se a lista mudou ou o OCR não confirmou,
+                // não usa coordenadas antigas: volta a ler e tenta novamente para evitar arrastar outro personagem por engano.
                 if (!lay.staysInList) {
                     val b2 = cap.latest()
                     val s2 = if (b2 != null) text.read(b2, 0f, 0.40f, 1f, 1f) else null
@@ -575,12 +574,13 @@ class TeamSwap(
                     if (w2 != null && abs(w2.cx - w0.cx) <= 0.05f && abs(w2.cy - w0.cy) <= 0.03f) {
                         confirmMiss = 0
                         w = w2
-                    } else if (++confirmMiss < 3) {
-                        say("Confirmando ${t.label}: não confere, lendo de novo")
-                        continue
                     } else {
-                        confirmMiss = 0
-                        w = w0
+                        confirmMiss++
+                        if (confirmMiss >= 3) {
+                            say("Ainda não confirmei ${t.label} no quadro novo; vou reler sem arrastar.")
+                            confirmMiss = 0
+                        }
+                        continue
                     }
                 }
                 if (isPaused()) return "Troca pausada"
@@ -653,16 +653,8 @@ class TeamSwap(
             // Nenhum dos que faltam está visível (análise parada).
             val falta = list.filterIndexed { k, _ -> !done[k] }.joinToString { it.label }
             if (phase >= phaseDirs.size) {
-                // Equipamento que sumiu da lista e cujo quadrado tem algum item: assume que está equipado (o jogo tira da lista o
-                // que o personagem usa) e guarda um print para você conferir. Quadrado vazio = falha de verdade.
-                if (lay.staysInList) {
-                    var todos = true
-                    for (k in list.indices) {
-                        if (done[k]) continue
-                        if (slotOccupied(s, k, lay) && wrongItemName(s, list[k], k, lay) == null) { done[k] = true; debug(b, "equip_${k + 1}_assumido") } else todos = false
-                    }
-                    if (todos && done.all { it }) return null
-                } else {
+                // Um quadrado ocupado não prova que o equipamento esperado está nele. Só conclui após ler o nome correto.
+                if (!lay.staysInList) {
                     // PROTEÇÃO (personagens): quem está no time some da lista de baixo. Se depois de varrer a lista inteira o personagem
                     // não apareceu e o quadrado tem algo lido que NÃO é o nome de outro personagem conhecido, assume que já está certo
                     // (o OCR só não leu o nome na carta pequena) e guarda um print (debug/personagem_N_assumido) para você conferir.
@@ -961,7 +953,7 @@ class TeamSwap(
         return false
     }
 
-    /** Confirma em quadros diferentes que os três quadrados estão ocupados e sem equipamento conhecido como errado. */
+    /** Confirma em quadros diferentes que o nome esperado foi reconhecido em cada quadrado. */
     private suspend fun confirmEquipmentSlots(list: List<Target>, lay: Layout): Boolean {
         val hits = IntArray(list.size)
         var lastFrame: Bitmap? = null
@@ -971,18 +963,52 @@ class TeamSwap(
             if (frame == null || frame.first === lastFrame) { delay(20); continue }
             lastFrame = frame.first
             reads++
-            val s = text.read(frame.first, 0.15f, 0.28f, 0.85f, 0.52f)
+            val s = readEquipmentSlots(frame.first, list.size, lay)
             for (i in list.indices) {
                 val wrong = wrongItemName(s, list[i], i, lay)
-                val matchesExpected = slotHas(s, list[i], i, lay)
-                // Alguns nomes pequenos não são lidos pelo OCR; aceita o slot ocupado apenas se não houver equipamento conhecido como errado.
-                val acceptable = wrong == null && (matchesExpected || slotOccupied(s, i, lay))
+                val matchesExpected = slotHas(s, list[i], i, lay) || gearNameInSlot(s, list[i], i, lay)
+                // Ocupação sem nome reconhecido é inconclusiva: não autoriza sair com um possível item errado.
+                val acceptable = wrong == null && matchesExpected
                 hits[i] = if (acceptable) (hits[i] + 1).coerceAtMost(2) else (hits[i] - 1).coerceAtLeast(0)
             }
             if (hits.all { it >= 2 }) return true
             delay(50)
         }
         return false
+    }
+
+    /** Lê cada quadrado em resolução ampliada para melhorar o OCR do nome do equipamento. */
+    private suspend fun readEquipmentSlots(bmp: Bitmap, count: Int, lay: Layout): Screen {
+        val words = ArrayList<Word>()
+        for (i in 0 until count) {
+            val cx = lay.slotX[i.coerceIn(0, 2)]
+            val l = (cx - 0.085f).coerceAtLeast(0f)
+            val r = (cx + 0.085f).coerceAtMost(1f)
+            val t = (lay.slotBand.start - 0.045f).coerceAtLeast(0f)
+            val b = (lay.slotBand.endInclusive + 0.045f).coerceAtMost(1f)
+            val x = (l * bmp.width).toInt().coerceIn(0, bmp.width - 1)
+            val y = (t * bmp.height).toInt().coerceIn(0, bmp.height - 1)
+            val w = ((r - l) * bmp.width).toInt().coerceIn(1, bmp.width - x)
+            val h = ((b - t) * bmp.height).toInt().coerceIn(1, bmp.height - y)
+            val crop = Bitmap.createBitmap(bmp, x, y, w, h)
+            val enlarged = Bitmap.createScaledBitmap(crop, w * 2, h * 2, true)
+            if (enlarged !== crop) crop.recycle()
+            try {
+                val read = text.read(enlarged)
+                words += read.words.map { word ->
+                    Word(word.text, l + word.cx * (r - l), t + word.cy * (b - t), word.w * (r - l), word.h * (b - t))
+                }
+            } finally {
+                enlarged.recycle()
+            }
+        }
+        return Screen(words)
+    }
+
+    /** Usa contexto de palavras próximas para tolerar pequenas falhas de OCR, mantendo a posição do quadrado. */
+    private fun gearNameInSlot(s: Screen, target: Target, idx: Int, lay: Layout): Boolean {
+        val name = findGearName(s, target, lay.slotBand.start - 0.01f) ?: return false
+        return name.cy in lay.slotBand && abs(name.cx - lay.slotX[idx.coerceIn(0, 2)]) < lay.slotDx
     }
 
     /**
