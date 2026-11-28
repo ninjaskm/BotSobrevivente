@@ -52,6 +52,9 @@ class TeamSwap(
     private val dragHoldMs = 900L
     private val dragMoveMs = 700L
 
+    /** Acelera somente as fases do gesto de equipar; mantém cada fase acima do mínimo aceito pelo Android. */
+    private fun equipGestureMs(ms: Long) = (ms / 3L).coerceAtLeast(1L)
+
     // Busca: equipamentos movem 600 ms e esperam 120 ms antes do OCR; personagens movem 190 ms e esperam 125 ms.
     // Ambos mantêm 110 ms parado no fim do gesto para a lista não ganhar impulso.
     private val charScrollMoveMs = 190L
@@ -603,24 +606,26 @@ class TeamSwap(
                     // Cada tentativa salva um print do resultado para diagnóstico.
                     val v = ((attempts[i] - 1) % 4).toInt()
                     val ciclo = ((attempts[i] - 1) / 4).coerceAtMost(3L)
-                    val hold = dragHoldMs + ciclo * 300L
-                    val move = dragMoveMs + ciclo * 200L
+                    val holdMs = dragHoldMs + ciclo * 300L
+                    val moveMs = dragMoveMs + ciclo * 200L
+                    val hold = equipGestureMs(holdMs)
+                    val move = equipGestureMs(moveMs)
                     say("Equipando ${t.label} no quadrado ${i + 1} (tentativa ${attempts[i]})")
                     val occupiedTarget = slotOccupied(dragScreen, i, lay)
                     if (occupiedTarget) {
                         // Se o espaço já contém um artefato, não toque nele: isso selecionava/abria o item errado.
                         // Use somente arrastos para substituir o que está equipado.
                         when (v) {
-                            0 -> g.drag(sx, sy, ex, ey, hold, move, 700L + ciclo * 200L)
-                            1 -> g.dragVia(sx, sy, sx, dragFrame.height * 0.52f, ex, ey, hold, 450L + ciclo * 100L, 550L + ciclo * 100L, 700L + ciclo * 200L)
-                            2 -> g.dragVia(sx, sy, sx, dragFrame.height * 0.56f, ex, ey, hold + 150L, 500L + ciclo * 100L, 650L + ciclo * 100L, 700L + ciclo * 200L)
-                            else -> g.drag(sx, sy, ex, ey, hold + 250L, move + 200L, 900L)
+                            0 -> g.drag(sx, sy, ex, ey, hold, move, equipGestureMs(700L + ciclo * 200L))
+                            1 -> g.dragVia(sx, sy, sx, dragFrame.height * 0.52f, ex, ey, hold, equipGestureMs(450L + ciclo * 100L), equipGestureMs(550L + ciclo * 100L), equipGestureMs(700L + ciclo * 200L))
+                            2 -> g.dragVia(sx, sy, sx, dragFrame.height * 0.56f, ex, ey, equipGestureMs(holdMs + 150L), equipGestureMs(500L + ciclo * 100L), equipGestureMs(650L + ciclo * 100L), equipGestureMs(700L + ciclo * 200L))
+                            else -> g.drag(sx, sy, ex, ey, equipGestureMs(holdMs + 250L), equipGestureMs(moveMs + 200L), equipGestureMs(900L))
                         }
                     } else when (v) {
-                        0 -> g.drag(sx, sy, ex, ey, hold, move, 500L + ciclo * 200L)                 // segura e arrasta direto
-                        1 -> g.dragVia(sx, sy, sx, dragFrame.height * 0.52f, ex, ey, hold, 400L + ciclo * 100L, 500L + ciclo * 100L, 500L + ciclo * 200L)
+                        0 -> g.drag(sx, sy, ex, ey, hold, move, equipGestureMs(500L + ciclo * 200L)) // segura e arrasta direto
+                        1 -> g.dragVia(sx, sy, sx, dragFrame.height * 0.52f, ex, ey, hold, equipGestureMs(400L + ciclo * 100L), equipGestureMs(500L + ciclo * 100L), equipGestureMs(500L + ciclo * 200L))
                         2 -> { g.tap(sx, sy); delay(800L + ciclo * 200L); g.tap(ex, ey) }           // slot vazio: tenta tocar no item e no destino
-                        else -> g.dragVia(sx, sy, sx, dragFrame.height * 0.56f, ex, ey, hold, 500L + ciclo * 100L, 650L + ciclo * 100L, 700L + ciclo * 200L)
+                        else -> g.dragVia(sx, sy, sx, dragFrame.height * 0.56f, ex, ey, hold, equipGestureMs(500L + ciclo * 100L), equipGestureMs(650L + ciclo * 100L), equipGestureMs(700L + ciclo * 200L))
                     }
                     delay(900)
                     cap.latest()?.let { debug(it, "equip_tentativa${attempts[i]}_${t.key}") }
