@@ -725,7 +725,7 @@ class Brain(
         }
         if (cfg.block && !paused) g.block(w, h, 350)
         // Pausa entre combos, não um atraso cego: poder ou minigame pronto interrompe o intervalo.
-        val nextComboAt = now() + 400L
+        val nextComboAt = now() + 450L
         while (!paused && now() < nextComboAt) {
             if (eventReady() || barReady()) return
             val c = freshPower(th)
