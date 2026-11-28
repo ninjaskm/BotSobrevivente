@@ -15,9 +15,9 @@ Base: código real em `app/src/main/java/com/matheus/bot/`. Onde o `README.md` d
 | 5 a 6 | Não iniciadas. |
 | 7 — Higiene e robustez | **Parcialmente concluída.** Logs de sessão e atualização do README já existem; falta definir o ciclo de `team`/`fights` para uma nova execução dentro do mesmo serviço. |
 
-**Nada foi compilado nem testado no celular.** O primeiro passo é abrir no Android Studio, dar o Sync e corrigir qualquer erro de compilação.
+**Validação pendente:** o Build Output mostrado no Android Studio falhou porque a conexão com o Kotlin daemon foi perdida. Isso não identifica, por si só, um erro de compilação no código; ainda é preciso obter uma compilação concluída e validar os tempos/minigames no aparelho. As alterações de montagem e equipamentos também dependem de observação em execução real.
 
-### Revisão estática do código (27/11, depois das fases 0, 2 e 3)
+### Revisão estática registrada (27/11, depois das fases 0, 2 e 3)
 
 Li `Brain`, `Heur`, `TextVision`, `TeamSwap`, `BotService` e o `build.gradle.kts` e conferi o que dava para conferir sem compilar:
 - [x] **Erro de compilação corrigido:** `BotService.onStartCommand` já tinha `val ch = "bot"` (canal da notificação) e a captura reduzida declarou outro `val ch` no mesmo escopo. Renomeado para `capW`/`capH`.
@@ -26,11 +26,11 @@ Li `Brain`, `Heur`, `TextVision`, `TeamSwap`, `BotService` e o `build.gradle.kts
 - [x] **Log de sessão** (`Session.kt` → `debug/sessao_<inicio>.txt`, 1 gravação por minuto, sobrescreve): lutas, ritmo (lutas/min), tempo em combate, minigames `ok`/`falso`/`forma`, poderes usados e travados, pausas, tela desconhecida, time morto. É a métrica para comparar versões.
 - [ ] Conferido por leitura, mas **sem compilar**: o resto das edições das fases 2 e 3 não mostrou outro erro de tipo ou de escopo. Só o Gradle confirma.
 
-Pendências que só você consegue fechar (o código não resolve sozinho):
-1. Compilar, rodar uma luta e guardar `perf.txt` e `sessao_*.txt`.
-2. Rodar com `Coletar quadros` ligado para formar o `dataset/` (necessário para as fases 4 e 5).
+Pendências de validação no aparelho:
+1. Concluir uma compilação e rodar uma luta, guardando `perf.txt` e `sessao_*.txt`.
+2. Rodar com `Coletar quadros` ligado para formar o `dataset/` (útil para validar a fase 4 e necessário para a fase 5).
 3. Rodar 10 ping pongs e ler `pingpong_acertos.txt`.
-Sem esses três arquivos qualquer "otimização" nova é chute.
+Sem essas medições, os valores atuais são configurações de partida, não resultados de desempenho comprovados.
 
 ---
 
@@ -49,13 +49,13 @@ Sem esses três arquivos qualquer "otimização" nova é chute.
 
 | # | Problema | Situação |
 |---|---|---|
-| D1 | O OCR decide quase tudo (botões, texto de evento, nome de carta); é lento e erra letra pequena sobre arte brilhante. | Aberto (fases 4 a 6). |
+| D1 | OCR decide botões, texto de evento e nomes; pode errar letras pequenas sobre arte brilhante. | **Parcial:** arte ajuda a identificar personagens (fase 4); reduzir mais OCR é opcional (fases 5 e 6, condicionadas às medições). |
 | D2 | Cada quadro novo vira um `Bitmap` de ~10 MB. | **Parcial:** captura em % da tela (`captureScalePct`), padrão 100. Falta medir se compensa. |
 | D3 | Percepção e ação rodam em série; poder só era lido a cada 2 arrastos. | **Feito (fase 2):** vigia em paralelo. |
 | D4 | Cada arrasto do combo era um `dispatchGesture` separado. | **Feito (fase 2):** `swipeBatch`. |
 | D5 | Limiares de cor calibrados com poucos prints. | Aberto. O modo de coleta (fase 0) junta os quadros para reajustar depois. |
 | D6 | Atraso real do toque desconhecido. | **Feito (fase 3):** medição e autocalibração contínua pelo cruzamento real do ponto branco. |
-| D7 | O nome da carta é a única identidade do personagem. | Aberto (fase 4). |
+| D7 | O nome da carta era a única identidade do personagem. | **Parcialmente resolvido:** `CardArt` ajuda a aceitar/rejeitar versões; os limites e as referências ainda precisam de validação no aparelho. |
 | D9 | Higiene (`tossDelayMs` morto, controles manuais de ping pong, `debug/` sem limite). | **Feito** nos itens de configuração e limpeza; o reset de `team`/`fights` segue na fase 7. |
 
 ---
@@ -68,7 +68,7 @@ Sem esses três arquivos qualquer "otimização" nova é chute.
 | Uso do poder 2 depois de carregar | até ~1 s | ≤ 0,15 s |
 | Falso positivo de minigame no meio da luta | ocorre | ≈ 0 por luta |
 | Ping pong | sem medida | ≥ 9 acertos em 10 |
-| Montagem de time | rodadas de até 50 s cada | ≤ 1 rodada de rolagem na maioria dos casos |
+| Montagem de time | trechos configuráveis de 3 a 120 s (padrão 17); equipamentos alternam a direção continuamente | ≤ 1 rodada de rolagem na maioria dos casos |
 | Versão de carta errada num quadrado | ocorre | 0 em 100 trocas |
 
 ---
@@ -83,8 +83,8 @@ Feito no código:
 - [x] **Modo de coleta** (`BotConfig.record`, caixa "Coletar quadros do combate"): grava em `debug/dataset/` até 4 quadros por segundo, `f_<horario>.jpg` (1280 px) mais `f_<horario>.json` (estado, minigame, texto do evento, hud, roxo, brilho/rosa/X de cada slot, poderes lidos). Limite de 2000 arquivos e 400 MB. Roda em outra thread; pode custar um pouco de CPU durante o ping pong.
 - [x] **Limpeza:** `debug/` limitado a 500 arquivos / 300 MB (apaga os mais antigos; não mexe em `perf*`, `pingpong_acertos*`, `sessao*` nem em `dataset/`); `perf.txt` vira `perf_old.txt` ao passar de 1 MB.
 
-Falta você fazer:
-- [ ] Rodar uma luta completa (com pelo menos 1 minigame de cada tipo) e copiar `Android/data/com.matheus.bot/files/debug/perf.txt` para `docs/perf_baseline.txt`. **Faça isto com a versão ANTERIOR ao commit das fases 2 e 3, ou com `Arrastos por lote = 1`,** para o baseline ser comparável.
+Falta coletar/validar:
+- [ ] Rodar uma luta completa (com pelo menos 1 minigame de cada tipo) e guardar `Android/data/com.matheus.bot/files/debug/perf.txt` como baseline, anotando o commit e as configurações usadas. Use `Arrastos por lote = 1` se a comparação precisar do comportamento antigo.
 - [ ] Rodar uma ou duas lutas com a coleta ligada e conferir se `dataset/` junta quadros de poder carregado, com X, vazio e de cada minigame. O ideal é ter pelo menos 300 quadros variados antes da fase 5.
 
 Aceite: `perf_baseline.txt` guardado; `dataset/` com quadros variados.
@@ -102,7 +102,7 @@ Retirada a pedido. Consequência: não há mais verificação automática dos li
 Feito no código (`Brain.kt`, `BotAccessibilityService.kt`, `Capture.kt`):
 - [x] **Vigia** (`Brain.watch`): coroutine própria que, em combate, lê cada quadro novo só com recortes pequenos. Publica os poderes (`Heur.power`) em `perceived`, mantém o OCR do texto do evento rodando (`scanEvent`) e confirma a forma da barra de encher (`barConfirmed`). Só percebe; quem age é o `Brain`.
 - [x] **Combo interrompível:** o combo consulta o vigia entre os lotes de arrasto (leitura de variável) e sai na hora se há minigame, barra confirmada ou poder carregado. Se a leitura do vigia tem mais de 300 ms, lê o quadro mais recente.
-- [x] **Arrastos em lote** (`swipeBatch`): vários arrastos num único gesto, `Arrastos por lote` (padrão 3, máximo 4; **1 = comportamento antigo**). Respeita `GestureDescription.getMaxStrokeCount()`.
+- [x] **Arrastos em lote** (`swipeBatch`): vários arrastos num único gesto, `Arrastos por lote` (padrão 2, máximo 4; **1 = um arrasto por gesto**). Respeita `GestureDescription.getMaxStrokeCount()`.
 - [x] **Captura mais barata:** `Tamanho da captura (%)` (padrão 100). Abaixo de 100 a captura encolhe e todos os gestos são convertidos para a tela real por `BotAccessibilityService.gestureScale`. Atenção: o OCR enxerga letra menor; antes de usar abaixo de 100, confira a montagem de time (equipamentos).
 - [x] **Anti-flap:** a barra continua exigindo 2 leituras seguidas no mesmo ponto (agora feitas pelo vigia, sem esperar o combo); poder carregado age no 1º quadro, como antes, com a trava `usePower`.
 - [x] `evBusy` virou `AtomicBoolean` (vários leitores chamam `scanEvent`) e `last`, `lastEvCheck` e `evBlockUntil` viraram `@Volatile`.
@@ -110,7 +110,7 @@ Feito no código (`Brain.kt`, `BotAccessibilityService.kt`, `Capture.kt`):
 
 Como validar (no `perf.txt` e na luta):
 - [ ] `watch_power` por quadro bem menor que `snap`; sem aumento de `capture_copy` com o vigia ligado.
-- [ ] Em 20 minigames, o 1º gesto sai ≤ 0,15 s depois de o texto/forma aparecer (mediana). Compare `Arrastos por lote` 1 e 3.
+- [ ] Em 20 minigames, o 1º gesto sai ≤ 0,15 s depois de o texto/forma aparecer (mediana). Compare `Arrastos por lote` 1 e 2.
 - [ ] Poder 2 usado ≤ 0,15 s depois de carregar.
 - [ ] Nenhum minigame disparado em falso no meio da luta (mesma taxa ou melhor que antes).
 - [ ] Se `gesture_overhead_batch` for muito maior que o esperado, ou o combo ficar menos fluido, volte `Arrastos por lote` para 1 ou 2.
@@ -138,7 +138,7 @@ Aceite: ≥ 9 acertos em 10 ping pongs seguidos (resultado no jogo) e `erroPrevi
 
 ### Fase 4 — Reconhecer personagem pela arte, não pelo nome — PASSO A: CÓDIGO PRONTO
 
-**Objetivo:** acabar com a dependência de ler subtítulo/nível (D7).
+**Objetivo:** reduzir a dependência de ler subtítulo/nível (D7), mantendo OCR como parte do reconhecimento.
 
 Feito no código (passo A, OpenCV, sem treino):
 - [x] **`CardArt.kt`:** compara recortes só da ARTE de referência (sem nível, subtítulo, nome nem números) com a faixa da lista de baixo (y 0,43 a 0,80) por *template matching* (`TM_CCOEFF_NORMED`, cor, 3 escalas: 0,88 / 1,0 / 1,14, largura de trabalho 640). Resultado: pontuação 0 a 1 por posição horizontal, com cache por quadro.
@@ -158,10 +158,20 @@ Limites conhecidos:
 - Flash Reverso, Apocalipse e Nevasca têm só a referência do quadrado (não da lista). Se a arte do quadrado for cortada diferente da da lista, a pontuação deles pode sair baixa: confira no `arte_scores.txt` e, se precisar, adicione um print da lista com eles.
 - A pontuação depende de a tela do bot ter a mesma proporção da foto (mesmo aparelho).
 
-Passo A, OpenCV, sem treino:
-- [ ] Recortar de prints reais uma **imagem de referência da arte** de cada carta e versão (Flash Reverso, Apocalipse "Contenção", Nevasca nível 50, Batman Ninja, Cavaleiro Arkham, Caçador de Marte "Noite Mais Densa" nível 50) e também das versões **erradas** conhecidas (Apocalipse "Noite Mais Densa", Nevasca "Regime", Batman "Foice", Caçador nível 45). Guardar em `app/src/main/assets/cartas/`.
-- [ ] Comparar a carta da lista com as referências em escala fixa, só na região da **arte** (sem texto, nível e bordas): histograma HSV + correlação normalizada, ou `AKAZE`/`ORB` com razão de Lowe. Escolher o método pelo resultado nos quadros do `dataset/`.
-- [ ] Resultado: `(personagem, versão, confiança)`. O `TeamSwap` usa isso para escolher a carta; o OCR do nome vira só confirmação.
+Passo A (OpenCV, sem treino) **já está implementado** conforme os itens acima. Não substituir o método atual por alternativas de histograma/AKAZE sem evidência de que o template matching falha.
+
+Validação ainda pendente:
+- [ ] Conferir `debug/arte_scores.txt` e ajustar os limites com capturas do aparelho; incluir referências negativas se uma versão errada pontuar como a certa.
+- [ ] Medir o reconhecimento em pelo menos 30 quadros por personagem antes de considerar a meta de 99% cumprida.
+
+### Atualização do fluxo de equipamentos (implementado)
+
+- Ao reconhecer a aba de equipamentos, espera 2 s antes da primeira leitura/ação.
+- A busca combina a chave e alternativas com palavras do nome completo; tolera um erro de OCR na chave só quando também reconhece contexto do mesmo cartão. Se a leitura em duas metades falhar, tenta uma leitura OCR da faixa inteira.
+- Antes de cada arrasto, confirma o nome em um quadro recente e relê o quadrado de destino. Se o item desejado já estiver equipado, pula o arrasto; se o nome não for confirmado no quadro novo, volta a ler sem arrastar.
+- Enquanto busca os itens, a cada 5 s faz uma verificação reforçada dos três quadrados. Se a regra de confirmação validar todos, interrompe a busca e segue pelo botão `CANCELAR`/`VOLTAR` para sair.
+- A lista usa gesto horizontal de 600 ms, espera 120 ms antes de reler e alterna esquerda/direita continuamente. A direção também inverte após 3 leituras consecutivas sem mudança perceptível; não há pausa longa de 500 ms entre inversões.
+- A confirmação final lê quadros diferentes e só volta ao lobby quando os três quadrados estão ocupados sem equipamento conhecido errado. Se não confirmar, repete a busca enquanto o bot estiver ativo.
 
 Passo B, só se o A não chegar a 99%:
 - [ ] Classificador pequeno de embeddings (MobileNetV3 ou EfficientNet-Lite, exportado para LiteRT/.tflite) com busca do vizinho mais próximo nas referências.

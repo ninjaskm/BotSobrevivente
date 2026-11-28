@@ -214,6 +214,52 @@ class TeamSwap(
                 !badSub(s, it, t) && levelOk(s, it, t)
         }.minByOrNull { it.cx }
 
+    /**
+     * Reconhece equipamento pelo texto completo quando a chave curta foi lida com um erro de OCR.
+     * Exige a chave (ou uma variação de uma letra) e pelo menos uma palavra do nome no mesmo cartão,
+     * para não confundir itens que compartilham "Divino do Quarto Mundo".
+     */
+    private fun findGearName(s: Screen, t: Target, yMin: Float): Word? {
+        val direct = findName(s, t, yMin = yMin)?.takeIf { line ->
+            allGearKeys.none { key -> key != t.key && line.text.contains(key) }
+        }
+        if (direct != null) return direct
+
+        val labelTokens = TextVision.norm(t.label).split(' ').filter { it.length >= 4 }
+        val key = TextVision.norm(t.key)
+        if (key.length < 4 || labelTokens.none { it != key }) return null
+        val candidates = s.words.filter { it.cy >= yMin }
+        for (anchor in candidates) {
+            val nearby = candidates.filter { abs(it.cx - anchor.cx) <= 0.065f && abs(it.cy - anchor.cy) <= 0.10f }
+            val tokens = nearby.flatMap { it.text.split(' ') }.filter { it.isNotBlank() }
+            val keySeen = tokens.any { closeOcrToken(it, key) }
+            val contextSeen = labelTokens.any { expected -> expected != key && tokens.any { closeOcrToken(it, expected) } }
+            val anotherGearSeen = allGearKeys.any { other -> other != t.key && tokens.any { it.contains(other) } }
+            if (keySeen && contextSeen && !anotherGearSeen) return anchor
+        }
+        return null
+    }
+
+    /** Distância de edição limitada a 1: cobre uma troca, inclusão ou omissão isolada do OCR. */
+    private fun closeOcrToken(actual: String, expected: String): Boolean {
+        if (actual == expected) return true
+        if (kotlin.math.abs(actual.length - expected.length) > 1) return false
+        var i = 0
+        var j = 0
+        var edits = 0
+        while (i < actual.length && j < expected.length) {
+            if (actual[i] == expected[j]) { i++; j++; continue }
+            if (++edits > 1) return false
+            when {
+                actual.length > expected.length -> i++
+                expected.length > actual.length -> j++
+                else -> { i++; j++ }
+            }
+        }
+        if (i < actual.length || j < expected.length) edits++
+        return edits <= 1
+    }
+
     /** A carta tem o subtítulo da versão ERRADA logo acima do nome? `notSub` aceita alternativas separadas por "|". */
     private fun badSub(s: Screen, name: Word, t: Target): Boolean {
         val bads = (t.notSub ?: return false).split('|')
@@ -362,8 +408,19 @@ class TeamSwap(
         var offPicker = 0
         var confirmMiss = 0      // leituras seguidas em que a confirmação do nome (antes de arrastar) não bateu
         var lastSig: Set<String> = emptySet()
+        var nextEquipmentAuditAt = now() + 5000L
         while (currentCoroutineContext().isActive && !isPaused()) {
             if (isPaused()) return "Troca pausada"
+            // A busca pode continuar por bastante tempo se o OCR/lista não confirmar um gesto. A cada 5 s,
+            // faça uma conferência reforçada dos três quadrados; se já estiverem corretos, encerra a busca.
+            if (lay.staysInList && now() >= nextEquipmentAuditAt) {
+                nextEquipmentAuditAt = now() + 5000L
+                say("Verificando os três equipamentos antes de continuar a busca...")
+                if (confirmEquipmentSlots(list, lay)) {
+                    say("Os três equipamentos foram confirmados; voltando ao lobby.")
+                    return null
+                }
+            }
             val b = cap.latest()
             if (b == null) { delay(200); continue }
             // Leia os quadrados só quando parado. Reutilize esse OCR na leitura principal para não analisar a mesma região duas vezes.
@@ -470,7 +527,7 @@ class TeamSwap(
             val found = HashMap<Int, Word>()
             for (k in list.indices) {
                 if (done[k]) continue
-                val fw = if (lay.staysInList) findName(s, list[k], yMin = lay.stripMinY, relaxed = relaxed)
+                val fw = if (lay.staysInList) findGearName(s, list[k], yMin = lay.stripMinY)
                 else findCard(b, s, list[k], lay.stripMinY, relaxed, phase)
                 if (fw != null) found[k] = fw
             }
@@ -478,51 +535,67 @@ class TeamSwap(
             if (i != null) {
                 val t = list[i]
                 val w0 = found.getValue(i)
-                // Antes de arrastar um equipamento, confira novamente o quadrado de destino num quadro recente.
-                // O item pode já ter sido equipado numa tentativa anterior ou reconhecido com atraso pelo OCR da lista.
+                var dragFrame = b
+                var dragScreen = s
+                var w = w0
+                // Valida o cartão de equipamento num quadro novo antes do gesto, como a confirmação de personagens.
+                // Se os recortes em duas metades não reconhecerem o nome, tenta também a faixa inteira da lista.
                 if (lay.staysInList) {
                     val latest = cap.latest()
-                    if (latest != null) {
-                        val slotsNow = text.read(latest, 0.15f, 0.28f, 0.85f, 0.52f)
-                        if (inSlot(slotsNow, t, i, lay)) {
-                            done[i] = true
-                            debug(latest, "equip_${i + 1}_ja_equipado_antes_arrasto")
-                            say("${t.label} já está equipado no quadrado ${i + 1}; seguindo para o próximo item.")
-                            continue
-                        }
+                    if (latest == null) continue
+                    var freshList = readListBoosted(latest)
+                    var freshWord = findGearName(freshList, t, lay.stripMinY)
+                    if (freshWord == null) {
+                        val fullStrip = text.read(latest, 0f, lay.stripMinY, 1f, 0.97f)
+                        freshList = Screen(freshList.words + fullStrip.words)
+                        freshWord = findGearName(freshList, t, lay.stripMinY)
                     }
+                    if (freshWord == null) {
+                        say("Confirmando ${t.label} na lista; não achei no quadro novo, vou reler antes de arrastar.")
+                        continue
+                    }
+                    val slotsNow = text.read(latest, 0.15f, 0.28f, 0.85f, 0.52f)
+                    if (inSlot(slotsNow, t, i, lay)) {
+                        done[i] = true
+                        debug(latest, "equip_${i + 1}_ja_equipado_antes_arrasto")
+                        say("${t.label} já está equipado no quadrado ${i + 1}; seguindo para o próximo item.")
+                        continue
+                    }
+                    dragFrame = latest
+                    dragScreen = Screen(freshList.words + slotsNow.words)
+                    w = freshWord
                 }
                 // Personagens: ANTES de arrastar confirma o NOME num quadro NOVO (a leitura de cima pode ser de uns 0,3 s atrás e a lista
                 // pode ter mexido). Se o personagem certo não está mais ali (ou andou), não arrasta: volta a analisar. Usa a posição
                 // nova. Depois de 3 conferências seguidas sem bater, arrasta mesmo assim com a leitura de cima (já tem versão e nível conferidos).
-                val w = if (lay.staysInList) w0 else {
+                if (!lay.staysInList) {
                     val b2 = cap.latest()
                     val s2 = if (b2 != null) text.read(b2, 0f, 0.40f, 1f, 1f) else null
                     val w2 = if (s2 != null && b2 != null) findCard(b2, s2, t, lay.stripMinY, relaxed, phase) else null
                     if (w2 != null && abs(w2.cx - w0.cx) <= 0.05f && abs(w2.cy - w0.cy) <= 0.03f) {
                         confirmMiss = 0
-                        w2
+                        w = w2
                     } else if (++confirmMiss < 3) {
                         say("Confirmando ${t.label}: não confere, lendo de novo")
                         continue
                     } else {
                         confirmMiss = 0
-                        w0
+                        w = w0
                     }
                 }
                 if (isPaused()) return "Troca pausada"
                 // Equipamento: pega pela linha INTEIRA do nome (centro da carta), não só pela palavra-chave, que fica mais à esquerda.
                 val c = if (lay.staysInList)
-                    s.words.filter {
+                    dragScreen.words.filter {
                         abs(it.cy - w.cy) < 0.012f && abs(it.cx - w.cx) < 0.07f && it.text.contains(w.text) &&
                             // linha que junta o nome de 2 cartas vizinhas tem o centro ENTRE elas (pegava a carta errada): ignora
                             allGearKeys.none { k -> k != t.key && it.text.contains(k) }
                     }.maxByOrNull { it.text.length } ?: w
                 else w
-                val sx = c.cx * b.width
-                val sy = w.cy * b.height - b.height * lay.srcDy   // corpo da carta, acima do nome
-                val ex = lay.slotX[i.coerceIn(0, 2)] * b.width
-                val ey = lay.slotY * b.height
+                val sx = c.cx * dragFrame.width
+                val sy = w.cy * dragFrame.height - dragFrame.height * lay.srcDy   // corpo da carta, acima do nome
+                val ex = lay.slotX[i.coerceIn(0, 2)] * dragFrame.width
+                val ey = lay.slotY * dragFrame.height
                 say("Arrastando ${t.label} para o quadrado ${i + 1}")
                 attempts[i]++
                 if (lay.staysInList) {
@@ -533,21 +606,21 @@ class TeamSwap(
                     val hold = dragHoldMs + ciclo * 300L
                     val move = dragMoveMs + ciclo * 200L
                     say("Equipando ${t.label} no quadrado ${i + 1} (tentativa ${attempts[i]})")
-                    val occupiedTarget = slotOccupied(s, i, lay)
+                    val occupiedTarget = slotOccupied(dragScreen, i, lay)
                     if (occupiedTarget) {
                         // Se o espaço já contém um artefato, não toque nele: isso selecionava/abria o item errado.
                         // Use somente arrastos para substituir o que está equipado.
                         when (v) {
                             0 -> g.drag(sx, sy, ex, ey, hold, move, 700L + ciclo * 200L)
-                            1 -> g.dragVia(sx, sy, sx, b.height * 0.52f, ex, ey, hold, 450L + ciclo * 100L, 550L + ciclo * 100L, 700L + ciclo * 200L)
-                            2 -> g.dragVia(sx, sy, sx, b.height * 0.56f, ex, ey, hold + 150L, 500L + ciclo * 100L, 650L + ciclo * 100L, 700L + ciclo * 200L)
+                            1 -> g.dragVia(sx, sy, sx, dragFrame.height * 0.52f, ex, ey, hold, 450L + ciclo * 100L, 550L + ciclo * 100L, 700L + ciclo * 200L)
+                            2 -> g.dragVia(sx, sy, sx, dragFrame.height * 0.56f, ex, ey, hold + 150L, 500L + ciclo * 100L, 650L + ciclo * 100L, 700L + ciclo * 200L)
                             else -> g.drag(sx, sy, ex, ey, hold + 250L, move + 200L, 900L)
                         }
                     } else when (v) {
                         0 -> g.drag(sx, sy, ex, ey, hold, move, 500L + ciclo * 200L)                 // segura e arrasta direto
-                        1 -> g.dragVia(sx, sy, sx, b.height * 0.52f, ex, ey, hold, 400L + ciclo * 100L, 500L + ciclo * 100L, 500L + ciclo * 200L)
+                        1 -> g.dragVia(sx, sy, sx, dragFrame.height * 0.52f, ex, ey, hold, 400L + ciclo * 100L, 500L + ciclo * 100L, 500L + ciclo * 200L)
                         2 -> { g.tap(sx, sy); delay(800L + ciclo * 200L); g.tap(ex, ey) }           // slot vazio: tenta tocar no item e no destino
-                        else -> g.dragVia(sx, sy, sx, b.height * 0.56f, ex, ey, hold, 500L + ciclo * 100L, 650L + ciclo * 100L, 700L + ciclo * 200L)
+                        else -> g.dragVia(sx, sy, sx, dragFrame.height * 0.56f, ex, ey, hold, 500L + ciclo * 100L, 650L + ciclo * 100L, 700L + ciclo * 200L)
                     }
                     delay(900)
                     cap.latest()?.let { debug(it, "equip_tentativa${attempts[i]}_${t.key}") }
